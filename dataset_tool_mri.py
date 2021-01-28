@@ -19,7 +19,7 @@ import util
 
 import nibabel as nib
 
-OUT_RESOLUTION = 512
+OUT_RESOLUTION = (260, 511)
 
 # Select z-slices from [25,124]
 slice_min = 25
@@ -51,7 +51,7 @@ all_basenames = [
     '104416_T1w_restore', '109123_T1w_restore', '114217_T1w_restore', '118528_T1w_restore', '123521_T1w_restore',
     '104820_T1w_restore', '109325_T1w_restore', '114318_T1w_restore', '118730_T1w_restore', '123824_T1w_restore'
 ]
-train_basenames = all_basenames[:4]
+train_basenames = all_basenames[0:4]
 valid_basenames = all_basenames[15:16]
 
 
@@ -118,7 +118,7 @@ def genpng(args):
         nii_img = nib.load(nii_file)
         name = os.path.basename(nii_file).split(".")[0]
         print("name", name)
-        hborder = (np.asarray([OUT_RESOLUTION, OUT_RESOLUTION]) - nii_img.shape[0:2]) // 2
+        hborder = (np.asarray(OUT_RESOLUTION) - nii_img.shape[0:2]) // 2
         print("Img: ", nii_img.shape, " border: ", hborder)
         # Normalize image to [0,1]
         img = nii_img.get_data().astype(np.float32)
@@ -129,7 +129,7 @@ def genpng(args):
         for s in range(slice_min, slice_max):
             slice = img[:, :, s]
             # Pad to output resolution by inserting zeros
-            output = np.zeros([OUT_RESOLUTION, OUT_RESOLUTION])
+            output = np.zeros(OUT_RESOLUTION)
             output[hborder[0] : hborder[0] + nii_img.shape[0], hborder[1] : hborder[1] + nii_img.shape[1]] = slice
             output = np.minimum(output, 1.0)
             output = np.maximum(output, 0.0)
