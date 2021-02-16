@@ -19,11 +19,12 @@ import util
 
 import nibabel as nib
 
-OUT_RESOLUTION = (260, 511)
+OUT_RESOLUTION = (260, 311)
 
-# Select z-slices from [25,124]
+# Select z-slices from [25,124] in hops of 5
 slice_min = 25
 slice_max = 125
+slice_hops = 5
 
 # Select train and validation subsets from IXI-T1 (these two lists shouldn't overlap)
 train_basenames=['IXI002-Guys-0828', 'IXI012-HH-1211', 'IXI013-HH-1212', 'IXI014-HH-1236', 'IXI015-HH-1258', 'IXI016-Guys-0697', 'IXI017-Guys-0698', 'IXI019-Guys-0702', 'IXI020-Guys-0700', 'IXI021-Guys-0703', 'IXI022-Guys-0701', 'IXI023-Guys-0699', 'IXI024-Guys-0705', 'IXI025-Guys-0852', 'IXI026-Guys-0696', 'IXI027-Guys-0710', 'IXI028-Guys-1038', 'IXI029-Guys-0829', 'IXI030-Guys-0708', 'IXI031-Guys-0797', 'IXI033-HH-1259', 'IXI034-HH-1260', 'IXI035-IOP-0873', 'IXI036-Guys-0736', 'IXI037-Guys-0704', 'IXI038-Guys-0729', 'IXI039-HH-1261', 'IXI040-Guys-0724', 'IXI041-Guys-0706', 'IXI042-Guys-0725', 'IXI043-Guys-0714', 'IXI044-Guys-0712', 'IXI045-Guys-0713', 'IXI046-Guys-0824', 'IXI048-HH-1326', 'IXI049-HH-1358', 'IXI050-Guys-0711', 'IXI051-HH-1328', 'IXI052-HH-1343', 'IXI053-Guys-0727', 'IXI054-Guys-0707', 'IXI055-Guys-0730', 'IXI056-HH-1327', 'IXI057-HH-1342', 'IXI058-Guys-0726', 'IXI059-HH-1284', 'IXI060-Guys-0709', 'IXI061-Guys-0715', 'IXI062-Guys-0740', 'IXI063-Guys-0742']
@@ -51,8 +52,8 @@ all_basenames = [
     '104416_T1w_restore', '109123_T1w_restore', '114217_T1w_restore', '118528_T1w_restore', '123521_T1w_restore',
     '104820_T1w_restore', '109325_T1w_restore', '114318_T1w_restore', '118730_T1w_restore', '123824_T1w_restore'
 ]
-train_basenames = all_basenames[0:4]
-valid_basenames = all_basenames[15:16]
+train_basenames = all_basenames[0:80]
+valid_basenames = all_basenames[80:100]
 
 
 def fftshift2d(x, ifft=False):
@@ -126,7 +127,8 @@ def genpng(args):
         print('Max value', np.max(img))
         # # Slice along z dimension
         #for s in range(70, nii_img.shape[2]-25):
-        for s in range(slice_min, slice_max):
+        ## select 1 out of 5 slices
+        for s in range(slice_min, slice_max, slice_hops):
             slice = img[:, :, s]
             # Pad to output resolution by inserting zeros
             output = np.zeros(OUT_RESOLUTION)
@@ -154,10 +156,10 @@ def genpkl(args):
     input_train_files = []
     input_valid_files = []
     for base in train_basenames:
-        for sidx in range(slice_min, slice_max):
+        for sidx in range(slice_min, slice_max, slice_hops):
             input_train_files.append(os.path.join(args.png_dir, make_slice_name(base, sidx)))
     for base in valid_basenames:
-        for sidx in range(slice_min, slice_max):
+        for sidx in range(slice_min, slice_max, slice_hops):
             input_valid_files.append(os.path.join(args.png_dir, make_slice_name(base, sidx)))
     print ('Num train samples', len(input_train_files))
     print ('Num valid samples', len(input_valid_files))
