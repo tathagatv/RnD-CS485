@@ -265,6 +265,7 @@ corruption_low_params3 = {
     'variance' : 0
 }
 
+# %%
 gpu_id = 1
 create_rrmse_data(corruption_high_params1, 'high_1', 'Undersample + Noise high', gpu_id=gpu_id)
 create_rrmse_data(corruption_low_params1, 'low_1', 'Undersample + Noise low', gpu_id=gpu_id)
@@ -283,6 +284,30 @@ create_rrmse_data(corruption_low_params3, 'low_3', 'Undersample low', gpu_id=gpu
 # for idx in [34,97,120]:
 #     img_arr = [test_img[idx], test_X[0][idx], test_X[1][idx], test_X[2][idx]]
 #     plot_img(img_arr, name='sample_high_noise', idx=idx)
+
+
+# %%
+%matplotlib inline
+def avg_img(cor_params, num_samples, idx, title):
+    avg_im = np.zeros_like(test_img[idx])
+    rrmse_hst = []
+    sample_hst = []
+    for i in range(1, num_samples+1):
+        im, sp = corrupt_data_gaussian(0, test_spec[idx], cor_params)
+        avg_im += im
+        rrmse_hst.append(rrmse(test_img[idx], avg_im/i))
+        sample_hst.append(i)
+    f = plt.figure()
+    plt.plot(sample_hst, rrmse_hst)
+    plt.ylabel('RRMSE')
+    plt.xlabel('number of samples')
+    plt.title(title)
+    plt.show()
+    plt.close(f)
+
+avg_img(corruption_high_params3, 1600, 34, 'undersample only high')
+avg_img(corruption_high_params2, 1600, 34, 'noise only high')
+avg_img(corruption_high_params1, 1600, 34, 'undersample + noise high')
 
 
 # %%
