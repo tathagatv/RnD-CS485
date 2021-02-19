@@ -1,5 +1,6 @@
 # %%
 import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 import torch
 import scipy
 import numpy as np
@@ -99,7 +100,6 @@ def rrmse(arrX, arrY):
     v = np.sqrt(v)
     return v
 
-
 def create_noisy_data(cor_params):
     t1 = time.time()
 
@@ -149,34 +149,81 @@ def rrmse_list(arrX, arrY):
         l.append(rrmse(arrX[i], arrY[i]))
     return l
 
-def create_rrmse_data(file_num, cor_params, plot_title, gpu_id):
+def plot_spec(spec):
+    spec = abs(spec)
+    spec = np.log10(spec)
+    spec -= spec.min()
+    spec *= 255/spec.max()
+    plt.figure()
+    plt.imshow(spec, cmap='gray')
+
+def plot_img(img_arr, img_name_arr, name, idx, title, save_img=False, cmap='gray'):
+
+    rrmse_arr = [0]*4
+    for i in range(1,4):
+        rrmse_arr[i] = rrmse(img_arr[0], img_arr[i])
+    for i in range(4):
+        img_arr[i] = (img_arr[i]+0.5)*255
+
+    combined_data = np.array(img_arr)
+    _min, _max = np.amin(combined_data), np.amax(combined_data)
+    fig = plt.figure(figsize=(18,15))
+
+    def plot_ax(ax, im, sub_title):
+        h = ax.imshow(im, cmap=cmap,vmin=_min, vmax=_max)
+        ax.autoscale(False)
+        ax.set_title(sub_title)
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        fig.colorbar(h, cax=cax)
+
+    ax = plt.subplot("221")
+    plot_ax(ax, img_arr[0], '%s' % img_name_arr[0])
+    ax = plt.subplot("222")
+    plot_ax(ax, img_arr[1], '%s, rrmse = %.4f' % (img_name_arr[1], rrmse_arr[1]))
+    ax = plt.subplot("223")
+    plot_ax(ax, img_arr[2], '%s, rrmse = %.4f'% (img_name_arr[2], rrmse_arr[2]))
+    ax = plt.subplot("224")
+    plot_ax(ax, img_arr[3], '%s, rrmse = %.4f'% (img_name_arr[3], rrmse_arr[3]))
+    # fig.suptitle(title)
+    if save_img:
+        plt.savefig(os.path.join(img_folder, "%s_%d.png" % (name, idx)), bbox_inches='tight')
+    plt.close(fig)
+
+
+def create_rrmse_data(cor_params, model_file, plot_title, gpu_id):
     print('\n------------------------')
     print("Corruption type: %s" % plot_title)
     train_X, train_Y, test_X, test_Y = create_noisy_data(cor_params)
-    rrmse_train_input = rrmse_list(train_img, train_X)
-    rrmse_test_input = rrmse_list(test_img, test_X)
+    rrmse_train_input, rrmse_test_input = rrmse_list(train_img, train_X), rrmse_list(test_img, test_X)
     
-    model = define_load_model(os.path.join(model_folder,"n2n_unet%s.pth" % file_num), gpu_id)
-    train_output = predict(model, train_X)
-    test_output = predict(model, test_X)
-    rrmse_train_n2n = rrmse_list(train_img, train_output)
-    rrmse_test_n2n = rrmse_list(test_img, test_output)
-    print("rrmse n2n train = %.4f, test = %.4f" % (rrmse(train_img, train_output), rrmse(test_img, test_output)))
-
-    model = define_load_model(os.path.join(model_folder,"n2c_unet%s.pth" % file_num), gpu_id)
-    train_output = predict(model, train_X)
-    test_output = predict(model, test_X)
-    rrmse_train_n2c = rrmse_list(train_img, train_output)
-    rrmse_test_n2c = rrmse_list(test_img, test_output)
-    print("rrmse n2c train = %.4f, test = %.4f" % (rrmse(train_img, train_output), rrmse(test_img, test_output)))
+    ## n2n predictions
+    model = define_load_model(os.path.join(model_folder,"n2n_%s.pth" % model_file), gpu_id)
+    train_output_n2n, test_output_n2n = predict(model, train_X), predict(model, test_X)
+    rrmse_train_n2n, rrmse_test_n2n = rrmse_list(train_img, train_output_n2n), rrmse_list(test_img, test_output_n2n)
+    print("rrmse n2n train = %.4f, test = %.4f" % (rrmse(train_img, train_output_n2n), rrmse(test_img, test_output_n2n)))
     
-    # plt.figure()
-    # plt.boxplot((rrmse_train_input, rrmse_train_n2n, rrmse_train_n2c, rrmse_test_n2n, rrmse_test_n2c),
-    # labels=('train input', 'n2n train', 'n2c train', 'n2n test', 'n2c test'))
-    # plt.title(plot_title)
-    # plt.ylabel('RRMSE')
-    # plt.savefig(os.path.join(img_folder,"boxplot%s.png" % file_num))
+    ## n2c predictions
+    model = define_load_model(os.path.join(model_folder,"n2c_%s.pth" % model_file), gpu_id)
+    train_output_n2c, test_output_n2c = predict(model, train_X), predict(model, test_X)
+    rrmse_train_n2c, rrmse_test_n2c = rrmse_list(train_img, train_output_n2c), rrmse_list(test_img, test_output_n2c)
+    print("rrmse n2c train = %.4f, test = %.4f" % (rrmse(train_img, train_output_n2c), rrmse(test_img, test_output_n2c)))
 
+    ## sample prediction images
+    for idx in [34, 97, 120]:
+        img_arr = [test_img[idx], test_X[idx], test_output_n2n[idx], test_output_n2c[idx]]
+        img_name_arr = ['Clean', 'Noisy input', 'N2N', 'N2C']
+        plot_img(img_arr, img_name_arr, 'pred_%s' % model_file,
+            idx, 'Predictions on %s corruption' % model_file, True)
+    
+    ## boxplot
+    f = plt.figure()
+    plt.boxplot((rrmse_test_input, rrmse_test_n2n, rrmse_test_n2c),
+        labels=('test input', 'n2n test', 'n2c test'), notch=True)
+    plt.title(plot_title)
+    plt.ylabel('RRMSE')
+    plt.savefig(os.path.join(img_folder,"boxplot_%s.png" % model_file))
+    plt.close(f)
 
 # %%
 ## corruption parameters
@@ -219,11 +266,12 @@ corruption_low_params3 = {
 }
 
 gpu_id = 1
-# create_rrmse_data(1, corruption_high_params1, 'Undersample + Noise', gpu_id=gpu_id)
-# create_rrmse_data(1, corruption_low_params1, 'Undersample + Noise', gpu_id=gpu_id)
-# create_rrmse_data(2, cor_params2, 'Noise only', gpu_id=gpu_id)
-# create_rrmse_data(3, cor_params3, 'Undersample only', gpu_id=gpu_id)
-
+create_rrmse_data(corruption_high_params1, 'high_1', 'Undersample + Noise high', gpu_id=gpu_id)
+create_rrmse_data(corruption_low_params1, 'low_1', 'Undersample + Noise low', gpu_id=gpu_id)
+create_rrmse_data(corruption_high_params2, 'high_2', 'Noise high', gpu_id=gpu_id)
+create_rrmse_data(corruption_low_params2, 'low_2', 'Noise low', gpu_id=gpu_id)
+create_rrmse_data(corruption_high_params3, 'high_3', 'Undersample high', gpu_id=gpu_id)
+create_rrmse_data(corruption_low_params3, 'low_3', 'Undersample low', gpu_id=gpu_id)
 
 ## create data to check rrmse and check plots
 # train_X, test_X = [0]*3, [0]*3
@@ -231,50 +279,6 @@ gpu_id = 1
 # train_X[1], _, test_X[1], _ = create_noisy_data(corruption_high_params2)
 # train_X[2], _, test_X[2], _ = create_noisy_data(corruption_high_params3)
 
-
-# %%
-%matplotlib inline
-import matplotlib.pyplot as plt
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-
-def plot_spec(spec):
-    spec = abs(spec)
-    spec = np.log10(spec)
-    spec -= spec.min()
-    spec *= 255/spec.max()
-    plt.figure()
-    plt.imshow(spec, cmap='gray')
-
-def plot_img(img_arr, name='sample', idx=0, cmap='gray'):
-
-    # cmap = 'jet'
-    rrmse_arr = [0]*4
-    for i in range(1,4):
-        rrmse_arr[i] = rrmse(img_arr[0], img_arr[i])
-    for i in range(4):
-        img_arr[i] = (img_arr[i]+0.5)*255
-
-    combined_data = np.array(img_arr)
-    _min, _max = np.amin(combined_data), np.amax(combined_data)
-    fig = plt.figure(figsize=(18,15))
-
-    def plot_ax(ax, im, sub_title):
-        h = ax.imshow(im, cmap=cmap,vmin=_min, vmax=_max)
-        ax.autoscale(False)
-        ax.set_title(sub_title)
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes("right", size="5%", pad=0.05)
-        fig.colorbar(h, cax=cax)
-
-    ax = plt.subplot("221")
-    plot_ax(ax, img_arr[0], 'Clean')
-    ax = plt.subplot("222")
-    plot_ax(ax, img_arr[1], 'Under+Noise, rrmse = %.4f' % rrmse_arr[1])
-    ax = plt.subplot("223")
-    plot_ax(ax, img_arr[2], 'Noise, rrmse = %.4f'% rrmse_arr[2])
-    ax = plt.subplot("224")
-    plot_ax(ax, img_arr[3], 'Under, rrmse = %.4f'% rrmse_arr[3])
-    plt.savefig(os.path.join(img_folder, "%s%d.png" % (name, idx)), bbox_inches='tight')
 
 # for idx in [34,97,120]:
 #     img_arr = [test_img[idx], test_X[0][idx], test_X[1][idx], test_X[2][idx]]
