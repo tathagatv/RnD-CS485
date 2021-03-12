@@ -1,12 +1,3 @@
-# Copyright (c) 2018, NVIDIA CORPORATION. All rights reserved.
-#
-# This work is licensed under the Creative Commons Attribution-NonCommercial
-# 4.0 International License. To view a copy of this license, visit
-# http://creativecommons.org/licenses/by-nc/4.0/ or send a letter to
-# Creative Commons, PO Box 1866, Mountain View, CA 94042, USA.
-
-# See README.md in this directory for instructions on how to use this script.
-
 import re
 import argparse
 import glob
@@ -14,7 +5,7 @@ import os
 import PIL.Image
 import numpy as np
 import sys
-
+import matplotlib.pyplot as plt
 import util
 
 import nibabel as nib
@@ -27,9 +18,6 @@ slice_max = 125
 slice_hops = 5
 
 # Select train and validation subsets from IXI-T1 (these two lists shouldn't overlap)
-train_basenames=['IXI002-Guys-0828', 'IXI012-HH-1211', 'IXI013-HH-1212', 'IXI014-HH-1236', 'IXI015-HH-1258', 'IXI016-Guys-0697', 'IXI017-Guys-0698', 'IXI019-Guys-0702', 'IXI020-Guys-0700', 'IXI021-Guys-0703', 'IXI022-Guys-0701', 'IXI023-Guys-0699', 'IXI024-Guys-0705', 'IXI025-Guys-0852', 'IXI026-Guys-0696', 'IXI027-Guys-0710', 'IXI028-Guys-1038', 'IXI029-Guys-0829', 'IXI030-Guys-0708', 'IXI031-Guys-0797', 'IXI033-HH-1259', 'IXI034-HH-1260', 'IXI035-IOP-0873', 'IXI036-Guys-0736', 'IXI037-Guys-0704', 'IXI038-Guys-0729', 'IXI039-HH-1261', 'IXI040-Guys-0724', 'IXI041-Guys-0706', 'IXI042-Guys-0725', 'IXI043-Guys-0714', 'IXI044-Guys-0712', 'IXI045-Guys-0713', 'IXI046-Guys-0824', 'IXI048-HH-1326', 'IXI049-HH-1358', 'IXI050-Guys-0711', 'IXI051-HH-1328', 'IXI052-HH-1343', 'IXI053-Guys-0727', 'IXI054-Guys-0707', 'IXI055-Guys-0730', 'IXI056-HH-1327', 'IXI057-HH-1342', 'IXI058-Guys-0726', 'IXI059-HH-1284', 'IXI060-Guys-0709', 'IXI061-Guys-0715', 'IXI062-Guys-0740', 'IXI063-Guys-0742']
-valid_basenames=['IXI064-Guys-0743', 'IXI065-Guys-0744', 'IXI066-Guys-0731', 'IXI067-HH-1356', 'IXI068-Guys-0756', 'IXI069-Guys-0769', 'IXI070-Guys-0767', 'IXI071-Guys-0770', 'IXI072-HH-2324', 'IXI073-Guys-0755']
-
 all_basenames = [
     '100206_T1w_restore', '105014_T1w_restore', '109830_T1w_restore', '114419_T1w_restore', '118932_T1w_restore',
     '100307_T1w_restore', '105115_T1w_restore', '110007_T1w_restore', '114621_T1w_restore', '119126_T1w_restore',
@@ -72,6 +60,7 @@ def preprocess_mri(input_files,
     assert num_images > 0
 
     resolution = np.asarray(PIL.Image.open(all_files[0]), dtype=np.uint8).shape
+    print(resolution)
     assert len(resolution) == 2 # Expect monochromatic images
     print('Image resolution: %s' % str(resolution))
 
@@ -79,17 +68,16 @@ def preprocess_mri(input_files,
     crop_slice = np.s_[:crop_size[0], :crop_size[1]]
     print('Crop size: %s' % str(crop_size))
 
-    img_primal = np.zeros((num_images,) + resolution, dtype=np.uint8)
+    img_primal = np.zeros((num_images,) + resolution, dtype=np.float32)
     img_spectrum = np.zeros((num_images,) + crop_size, dtype=np.complex64)
 
     print('Processing input files..')
     for i, fn in enumerate(all_files):
         if i % 100 == 0:
             print('%d / %d ..' % (i, num_images))
-        img = np.asarray(PIL.Image.open(fn), dtype=np.uint8)
+        img = np.asarray(PIL.Image.open(fn), dtype=np.float32) / 255.0
         img_primal[i] = img
 
-        img = img.astype(np.float32) / 255.0 - 0.5
         img = img[crop_slice]
         spec = np.fft.fft2(img).astype(np.complex64)
         spec = fftshift2d(spec)
@@ -126,21 +114,18 @@ def genpng(args):
         img = img / np.max(img)
         print('Max value', np.max(img))
         # # Slice along z dimension
-        #for s in range(70, nii_img.shape[2]-25):
         ## select 1 out of 5 slices
         for s in range(slice_min, slice_max, slice_hops):
             slice = img[:, :, s]
             # Pad to output resolution by inserting zeros
             output = np.zeros(OUT_RESOLUTION)
             output[hborder[0] : hborder[0] + nii_img.shape[0], hborder[1] : hborder[1] + nii_img.shape[1]] = slice
-            output = np.minimum(output, 1.0)
-            output = np.maximum(output, 0.0)
-            output = output * 255
+            output = np.clip(output, 0.0, 1.0) * 255.0
+            output = output.astype(np.uint8)
 
             # Save to png
-            if np.max(output) > 1.0:
-                outname = os.path.join(out_directory, "%s_%03d.png" % (name, s))
-                PIL.Image.fromarray(output).convert('L').save(outname)
+            outname = os.path.join(out_directory, "%s_%03d.png" % (name, s))
+            PIL.Image.fromarray(output).convert('L').save(outname)
 
 def make_slice_name(basename, slice_idx):
     return basename + ('_%03d.png' % slice_idx)

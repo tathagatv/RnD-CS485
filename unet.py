@@ -43,7 +43,7 @@ class UNet(nn.Module):
         )
 
     def forward(self, x):
-        enc1 = self.encoder1(nn.functional.pad(x, (5,5,6,7)))
+        enc1 = self.encoder1(nn.functional.pad(x, (4,5,6,7)))
         enc2 = self.encoder2(self.pool1(enc1))
         enc3 = self.encoder3(self.pool2(enc2))
         enc4 = self.encoder4(self.pool3(enc3))
@@ -63,8 +63,8 @@ class UNet(nn.Module):
         dec1 = torch.cat((dec1, enc1), dim=1)
         dec1 = self.decoder1(dec1)
         dec1 = self.conv(dec1)
-        dec1 = dec1[:, :, 6:-7, 5:-5]
-        return torch.clamp(dec1, -0.5, 0.5)
+        dec1 = dec1[:, :, 6:-7, 4:-5]
+        return torch.clamp(dec1, 0.0, 1.0)
 
     @staticmethod
     def _block(in_channels, features, name):
@@ -103,5 +103,5 @@ if __name__ == "__main__":
 
     model = UNet(init_features=16)
     device = torch.device("cpu")
-    summary(model, (1, 259, 310), device='cpu')
+    summary(model, (1, 259, 311), device='cpu')
 
