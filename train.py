@@ -49,7 +49,7 @@ def plot_spec(spec):
     plt.figure()
     plt.imshow(spec, cmap='gray')
 
-def runner(corr_type, gpu_id, model_type, lamb=0, epochs=300, batch_size=64):
+def runner(corr_type, device_name, model_type, lamb=0, epochs=300, batch_size=64):
 
     if model_type not in ['n2n', 'n2c']:
         print("model_type should be 'n2n' or 'n2c'")
@@ -74,9 +74,9 @@ def runner(corr_type, gpu_id, model_type, lamb=0, epochs=300, batch_size=64):
 
     train_output, test_output = np.zeros_like(train_X), np.zeros_like(test_X)
 
+    print('time for corrupting data = %.2f sec' % (time.time()-t1))
     print("RRMSE train, test inputs = %.4f, %.4f" % (rrmse(train_img, train_X), rrmse(test_img, test_X)))
     print("SSIM train, test inputs = %.4f, %.4f" % (ssim(train_img, train_X), ssim(test_img, test_X)))
-    print('time for corrupting data = %.2f sec' % (time.time()-t1))
     print('data loading done')
 
     model = UNet(init_features=16)
@@ -84,8 +84,8 @@ def runner(corr_type, gpu_id, model_type, lamb=0, epochs=300, batch_size=64):
 
     optimizer = optim.Adam(model.parameters(), lr=0.02)
 
-    device = torch.device("%s" % gpu_id)
-    if gpu_id.startswith('cuda'):
+    device = torch.device("%s" % device_name)
+    if device_name.startswith('cuda'):
         torch.cuda.set_device(device)
         print(device, torch.cuda.current_device())
     model.to(device)
@@ -104,6 +104,7 @@ def runner(corr_type, gpu_id, model_type, lamb=0, epochs=300, batch_size=64):
     elif model_type == 'n2n':
         target_img, target_spec, target_rows = train_Y, train_Y_spec, train_Y_rows
     t1 = time.time()
+    loss_history = []
     for ep in range(epochs):
 
         running_loss = 0.0
@@ -126,25 +127,25 @@ def runner(corr_type, gpu_id, model_type, lamb=0, epochs=300, batch_size=64):
             outputs = outputs.cpu().detach().numpy()[:,0,:,:]
             inputs = inputs.cpu().detach().numpy()[:,0,:,:]
 
-            ## compute regularization term
-            for j in range(i, min(i+batch_size, len(train_X))):
-                # output_spec[j-i] = torch.fft.fftshift(output_spec[j-i], dim=(-2, -1))
-                output_spec[j-i, 0] = fftshift2d_torch(output_spec[j-i, 0])
-                output_spec[j-i, 0][target_rows[j]] = (1 + 1j)*(1e-5)
-                # output_spec[j-i] = torch.fft.ifftshift(output_spec[j-i], dim=(-2, -1))
-                output_spec[j-i, 0] = fftshift2d_torch(output_spec[j-i, 0], ifft=True)
+            if lamb > 0:
+                ## compute regularization term
+                for j in range(i, min(i+batch_size, len(train_X))):
+                    output_spec[j-i, 0] = fftshift2d_torch(output_spec[j-i, 0])
+                    output_spec[j-i, 0][target_rows[j]] = (1 + 1j)*(1e-5)
+                    output_spec[j-i, 0] = fftshift2d_torch(output_spec[j-i, 0], ifft=True)
+                
+                target_spec_labels = target_spec[i : i+batch_size]
+                target_spec_labels = target_spec_labels[:, np.newaxis, :, :]
+                target_spec_labels = torch.from_numpy(target_spec_labels)
+                target_spec_labels = target_spec_labels.to(device)
+                v = torch.mean(torch.absolute(output_spec - target_spec_labels)**2)
+                target_spec_labels = target_spec_labels.cpu().detach().numpy()[:,0,:,:]
+                running_freq_loss += v*len(inputs)
+                loss += v*lamb
             
-            target_spec_labels = target_spec[i : i+batch_size]
-            target_spec_labels = target_spec_labels[:, np.newaxis, :, :]
-            target_spec_labels = torch.from_numpy(target_spec_labels)
-            target_spec_labels = target_spec_labels.to(device)
-            v = torch.mean(torch.absolute(output_spec - target_spec_labels)**2)
-            running_freq_loss += v*len(inputs)
-            loss += v*lamb
             loss.backward()
             optimizer.step()
             output_spec = output_spec.cpu().detach().numpy()[:,0,:,:]
-            target_spec_labels = target_spec_labels.cpu().detach().numpy()[:,0,:,:]
 
             train_output[i : i+batch_size] = outputs
             running_loss += loss.item()*len(inputs)
@@ -153,6 +154,7 @@ def runner(corr_type, gpu_id, model_type, lamb=0, epochs=300, batch_size=64):
         running_loss = running_loss / len(train_X)
         rrmse_train = rrmse(train_img, train_output)
         running_freq_loss /= len(train_X)
+        loss_history.append(running_loss)
         
         print("epoch %s loss = %.5f, time = %.2f sec, rrmse = %.4f, k-space mse = %.4f" %
         (ep, running_loss, time.time()-t2, rrmse_train, running_freq_loss))
@@ -162,6 +164,17 @@ def runner(corr_type, gpu_id, model_type, lamb=0, epochs=300, batch_size=64):
 
     print('Finished training, total time = %.1f min' % ((time.time()-t1)/60))
     torch.save(model.state_dict(), model_path)
+    print('Model saved in %s' % model_path)
+
+    fig = plt.figure()
+    epoch_arr = list(np.arange(epochs))
+    plt.plot(epoch_arr[:20], loss_history[:20])
+    plt.savefig('%s_loss.png' % (model_path[:-4]))
+    plt.xlabel('epoch')
+    plt.ylabel('loss')
+    plt.title('%s %s %s' % (model_type, corr_type, lamb))
+    plt.tight_layout()
+    plt.close(fig)
 
     #------------------------------------------------------
     # result metrics
@@ -178,24 +191,18 @@ def runner(corr_type, gpu_id, model_type, lamb=0, epochs=300, batch_size=64):
             preds[i : i+batch_size, :, :] = outputs[:, 0, :, :]
         return preds
 
+    print('Corruption type : %s, lambda = %s, model type : %s' % (corr_type, lamb, model_type))
+
     train_output = predict(train_X)
-
-    rrmse_inp = rrmse(train_img, train_X)
-    rrmse_out = rrmse(train_img, train_output)
-    ssim_inp = ssim(train_img, train_X)
-    ssim_out = ssim(train_img, train_output)
-
+    rrmse_inp, rrmse_out = rrmse(train_img, train_X), rrmse(train_img, train_output)
+    ssim_inp, ssim_out = ssim(train_img, train_X), ssim(train_img, train_output)
     print("Train data")
     print('rrmse input = %.4f, output = %.4f' % (rrmse_inp, rrmse_out))
     print('ssim input = %.4f, output = %.4f' % (ssim_inp, ssim_out))
 
     test_output = predict(test_X)
-
-    rrmse_inp = rrmse(test_img, test_X)
-    rrmse_out = rrmse(test_img, test_output)
-    ssim_inp = ssim(test_img, test_X)
-    ssim_out = ssim(test_img, test_output)
-
+    rrmse_inp, rrmse_out = rrmse(test_img, test_X), rrmse(test_img, test_output)
+    ssim_inp, ssim_out = ssim(test_img, test_X), ssim(test_img, test_output)
     print("Test data")
     print('rrmse input = %.4f, output = %.4f' % (rrmse_inp, rrmse_out))
     print('ssim input = %.4f, output = %.4f' % (ssim_inp, ssim_out))
@@ -240,39 +247,43 @@ corruption_params = {
 }
 
 # %%
+runner('low_3', 'cuda:1', 'n2c', 1e-4, 20, 60)
+
+# %%
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model_type", type=str, help="n2n or n2c")
-parser.add_argument("--gpu", type=str, help="free gpu - (cuda:id) or cpu")
+parser.add_argument("--device", type=str, help="free gpu - (cuda:id) or cpu")
 parser.add_argument("--lamb", type=float, help="regularization weight")
 args = parser.parse_args()
 
-gpu_id = args.gpu
+device_name = args.device
 model_type = args.model_type
 lamb = args.lamb
 
-if gpu_id is None or model_type is None or lamb is None:
-    print("gpu, model_type, lamb needed")
+if device_name is None or model_type is None or lamb is None:
+    print("device, model_type, lamb needed")
     exit()
-batch_size = 60
+batch_size = 64
+epochs = 300
 
 ### under + noise
 print('\n---------------------------')
-runner(corr_type='low_1', gpu_id=gpu_id, model_type=model_type, lamb=lamb, batch_size=batch_size)
+runner('low_1', device_name, model_type, lamb, epochs, batch_size)
 print('\n---------------------------')
-runner(corr_type='high_1', gpu_id=gpu_id, model_type=model_type, lamb=lamb, batch_size=batch_size)
+runner('high_1', device_name, model_type, lamb, epochs, batch_size)
 
 ### noise
 print('\n---------------------------')
-runner(corr_type='low_2', gpu_id=gpu_id, model_type=model_type, lamb=lamb, batch_size=batch_size)
+runner('low_2', device_name, model_type, lamb, epochs, batch_size)
 print('\n---------------------------')
-runner(corr_type='high_2', gpu_id=gpu_id, model_type=model_type, lamb=lamb, batch_size=batch_size)
+runner('high_2', device_name, model_type, lamb, epochs, batch_size)
 
 ## under
 print('\n---------------------------')
-runner(corr_type='low_3', gpu_id=gpu_id, model_type=model_type, lamb=lamb, batch_size=batch_size)
+runner('low_3', device_name, model_type, lamb, epochs, batch_size)
 print('\n---------------------------')
-runner(corr_type='high_3', gpu_id=gpu_id, model_type=model_type, lamb=lamb, batch_size=batch_size)
+runner('high_3', device_name, model_type, lamb, epochs, batch_size)
 
 
 
