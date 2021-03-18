@@ -3,6 +3,7 @@ import numpy as np
 import pickle
 import random
 import PIL.Image
+import torch
 
 def corrupt_data_gaussian(img, spec, params):
     rows = spec.shape[0]
@@ -30,6 +31,16 @@ def corrupt_data_gaussian(img, spec, params):
     corrupt_img = np.clip(corrupt_img, 0.0, 1.0)
 
     return corrupt_img, corrupt_spec, undersample_rows
+
+def predict(model, input_imgs, batch_size, device):
+    preds = np.zeros_like(input_imgs)
+    with torch.no_grad():
+        input_arr = input_imgs[:, np.newaxis, :, :]
+        for i in range(0, len(input_imgs), batch_size):
+            inputs = torch.from_numpy(input_arr[i : i+batch_size]).to(device)
+            outputs = model(inputs).cpu().detach().numpy()
+            preds[i : i+batch_size, :, :] = outputs[:, 0, :, :]
+    return preds
 
 def rrmse(arrX, arrY):
     v = np.square(arrX - arrY).sum()
@@ -59,11 +70,9 @@ def load_dataset(fn, num_images=None, shuffle=False):
         img = img[:num_images]
         spec = spec[:num_images]
 
-    # Remove last row/column of the images, we're officially 255x255 now.
     img = img[:, :-1, :]
     spec = np.fft.fft2(img).astype(np.complex64)
     print('image, spec shape from pkl file:', img.shape, spec.shape)
-
     return img, spec
 
 # save_pkl, load_pkl are used by the mri code to save datasets

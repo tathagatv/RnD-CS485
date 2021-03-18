@@ -16,7 +16,8 @@ import random
 import argparse
 import matplotlib.pyplot as plt
 from unet import UNet
-from util import corrupt_data_gaussian, rrmse, load_dataset
+from util import corrupt_data_gaussian, rrmse, load_dataset, predict
+from pytorch_wavelets import DTCWTForward, DTCWTInverse
 
 np.random.seed(0)
 random.seed(0)
@@ -34,10 +35,24 @@ def fftshift2d_torch(x, ifft=False):
 #----------------------------------------------------------------------------
 # Dataset loader
 
-dataset_train, dataset_test = dict(), dict()
-train_img, train_spec = load_dataset('ixi_train.pkl', num_images=1000)
-test_img, test_spec = load_dataset('ixi_valid.pkl', num_images=200)
+train_sz, valid_sz, test_sz = 800, 200, 200
+train_img, train_spec = load_dataset('ixi_train.pkl', num_images=train_sz+valid_sz)
+test_img, test_spec = load_dataset('ixi_valid.pkl', num_images=test_sz)
+valid_img, valid_spec = train_img[train_sz:, :, :], train_spec[train_sz:, :, :]
+train_img, train_spec = train_img[:train_sz, :, :], train_spec[:train_sz, :, :]
 model_folder = 'trained_model'
+
+## create wavelet transform
+dtcwt_fn = DTCWTForward()
+def dtcwt_from_np(imgs):
+    torch_imgs = imgs[:, np.newaxis, :, :].astype(np.float32)
+    torch_imgs = torch.from_numpy(torch_imgs)
+    yl, yh = dtcwt_fn.forward(torch_imgs)
+    return yl, yh
+
+train_dtcwt = dtcwt_from_np(train_img)
+valid_dtcwt = dtcwt_from_np(valid_img)
+test_dtcwt = dtcwt_from_np(test_img)
 
 # %%
 # Runner function
@@ -49,7 +64,7 @@ def plot_spec(spec):
     plt.figure()
     plt.imshow(spec, cmap='gray')
 
-def runner(corr_type, device_name, model_type, lamb=0, epochs=300, batch_size=64):
+def runner(corr_type, device_name, model_type, spatial_wt=1, fft_wt=0, dtcwt_wt=0, epochs=300, batch_size=64):
 
     if model_type not in ['n2n', 'n2c']:
         print("model_type should be 'n2n' or 'n2c'")
@@ -57,30 +72,40 @@ def runner(corr_type, device_name, model_type, lamb=0, epochs=300, batch_size=64
     cor_params = corruption_params[corr_type]
     
     train_X, train_Y = np.zeros_like(train_img), np.zeros_like(train_img)
-    test_X, test_Y = np.zeros_like(test_img), np.zeros_like(test_img)
     train_X_spec, train_Y_spec = np.zeros_like(train_spec), np.zeros_like(train_spec)
-    test_X_spec, test_Y_spec = np.zeros_like(test_spec), np.zeros_like(test_spec)
     train_X_rows, train_Y_rows = [0]*train_img.shape[0], [0]*train_img.shape[0]
-    test_X_rows, test_Y_rows = [0]*test_img.shape[0], [0]*test_img.shape[0]
+    
+    valid_X, valid_Y = np.zeros_like(valid_img), np.zeros_like(valid_img)
+    valid_X_spec, valid_Y_spec = np.zeros_like(valid_spec), np.zeros_like(valid_spec)
+    valid_X_rows, valid_Y_rows = [0]*valid_img.shape[0], [0]*valid_img.shape[0]
+
+    test_X = np.zeros_like(test_img)
+    test_X_spec = np.zeros_like(test_spec)
+    test_X_rows = [0]*test_img.shape[0]
 
     t1 = time.time()
     for i in range(train_img.shape[0]):
         train_X[i], train_X_spec[i], train_X_rows[i] = corrupt_data_gaussian(0, train_spec[i], cor_params)
         train_Y[i], train_Y_spec[i], train_Y_rows[i] = corrupt_data_gaussian(0, train_spec[i], cor_params)
 
+    for i in range(valid_img.shape[0]):
+        valid_X[i], valid_X_spec[i], valid_X_rows[i] = corrupt_data_gaussian(0, valid_spec[i], cor_params)
+        valid_Y[i], valid_Y_spec[i], valid_Y_rows[i] = corrupt_data_gaussian(0, valid_spec[i], cor_params)
+
     for i in range(test_img.shape[0]):
         test_X[i], test_X_spec[i], test_X_rows[i] = corrupt_data_gaussian(0, test_spec[i], cor_params)
-        test_Y[i], test_Y_spec[i], test_Y_rows[i] = corrupt_data_gaussian(0, test_spec[i], cor_params)
 
-    train_output, test_output = np.zeros_like(train_X), np.zeros_like(test_X)
+    train_output, valid_output, test_output = np.zeros_like(train_X), np.zeros_like(valid_X), np.zeros_like(test_X)
 
     print('time for corrupting data = %.2f sec' % (time.time()-t1))
     print("RRMSE train, test inputs = %.4f, %.4f" % (rrmse(train_img, train_X), rrmse(test_img, test_X)))
-    print("SSIM train, test inputs = %.4f, %.4f" % (ssim(train_img, train_X), ssim(test_img, test_X)))
+    # print("SSIM train, test inputs = %.4f, %.4f" % (ssim(train_img, train_X), ssim(test_img, test_X)))
     print('data loading done')
 
+    ## create model
     model = UNet(init_features=16)
-    model_path = os.path.join(model_folder, '%s_%s_%s.pth' % (model_type, corr_type, lamb))
+    model_path = os.path.join(model_folder, '%s_%s_%s_%s_%s.pth' %
+        (model_type, corr_type, spatial_wt, fft_wt, dtcwt_wt))
 
     optimizer = optim.Adam(model.parameters(), lr=0.02)
 
@@ -95,86 +120,137 @@ def runner(corr_type, device_name, model_type, lamb=0, epochs=300, batch_size=64
         model.load_state_dict(torch.load(model_path, map_location=device))
         print("loaded existing model")
     except Exception as e:
-        print(e)
-    model.train()
+        print('no pre-existing model')
+    print('Model file name: %s' % model_path)
 
+    ## set target images and spectrum
     target_img, target_spec, target_rows = 0, 0, 0
+    valid_target_img, valid_target_spec, valid_target_rows = 0, 0, 0
     if model_type == 'n2c':
         target_img, target_spec, target_rows = train_img, train_spec, [[]]*len(train_img)
+        valid_target_img, valid_target_spec, valid_target_rows = valid_img, valid_spec, [[]]*len(valid_img)
+        target_dtcwt, valid_target_dtcwt = train_dtcwt, valid_dtcwt
     elif model_type == 'n2n':
         target_img, target_spec, target_rows = train_Y, train_Y_spec, train_Y_rows
+        valid_target_img, valid_target_spec, valid_target_rows = valid_Y, valid_Y_spec, valid_Y_rows
+        target_dtcwt, valid_target_dtcwt = train_dtcwt, valid_dtcwt
+
     t1 = time.time()
-    loss_history = []
+    train_loss_history, valid_loss_history = [], []
+    
+    ## add channel dimension
+    train_X, valid_X = train_X[:, np.newaxis, :, :], valid_X[:, np.newaxis, :, :]
+    target_img, valid_target_img = target_img[:, np.newaxis, :, :], valid_target_img[:, np.newaxis, :, :]
+    
+    min_valid_loss, min_loss_ep = 0, 0
+    early_stopping_tolerance = 10
+    dtcwt_fn = DTCWTForward().to(device)
+
     for ep in range(epochs):
 
-        running_loss = 0.0
-        running_freq_loss = 0.0
+        model.train()
+        running_loss, running_fft_loss, running_dtcwt_loss = 0.0, 0.0, 0.0
         i = 0
         t2 = time.time()
         while i < len(train_X):
-            inputs = train_X[i : i+batch_size]
-            inputs = inputs[:, np.newaxis, :, :].astype(np.float32)
-            inputs = torch.from_numpy(inputs)
-            labels = target_img[i : i+batch_size]
-            labels = labels[:, np.newaxis, :, :].astype(np.float32)
-            labels = torch.from_numpy(labels)
+            
+            inputs = torch.from_numpy(train_X[i : i+batch_size]).to(device)
+            labels = torch.from_numpy(target_img[i : i+batch_size]).to(device)
+            sz = len(inputs)
 
-            inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
             outputs = model(inputs)
-            loss = torch.mean((outputs - labels)**2) * (1-lamb)
-            output_spec = torch.fft.fftn(outputs, dim=(-2, -1)).type(torch.complex64)
-            outputs = outputs.cpu().detach().numpy()[:,0,:,:]
-            inputs = inputs.cpu().detach().numpy()[:,0,:,:]
 
-            if lamb > 0:
-                ## compute regularization term
-                for j in range(i, min(i+batch_size, len(train_X))):
-                    output_spec[j-i, 0] = fftshift2d_torch(output_spec[j-i, 0])
-                    output_spec[j-i, 0][target_rows[j]] = (1 + 1j)*(1e-5)
-                    output_spec[j-i, 0] = fftshift2d_torch(output_spec[j-i, 0], ifft=True)
-                
-                target_spec_labels = target_spec[i : i+batch_size]
-                target_spec_labels = target_spec_labels[:, np.newaxis, :, :]
-                target_spec_labels = torch.from_numpy(target_spec_labels)
-                target_spec_labels = target_spec_labels.to(device)
-                v = torch.mean(torch.absolute(output_spec - target_spec_labels)**2)
-                target_spec_labels = target_spec_labels.cpu().detach().numpy()[:,0,:,:]
-                running_freq_loss += v*len(inputs)
-                loss += v*lamb
+            ## spatial loss
+            loss = torch.mean((outputs - labels)**2) * spatial_wt
+            del labels, inputs ## free up gpu
+
+            ## dtcwt loss
+            output_dtcwt = dtcwt_fn.forward(outputs)
+            target_dtcwt_labels = target_dtcwt[0][i: i+batch_size].to(device)
+            dtcwt_loss = torch.mean(torch.absolute(output_dtcwt[0] - target_dtcwt_labels)**2)
+            for j in range(len(output_dtcwt[1])):
+                target_dtcwt_labels = target_dtcwt[1][j][i: i+batch_size].to(device)
+                dtcwt_loss += torch.mean(torch.absolute(output_dtcwt[1][j] - target_dtcwt_labels)**2)
+            running_dtcwt_loss += dtcwt_loss * sz
+            loss += dtcwt_loss * dtcwt_wt
+            del output_dtcwt, target_dtcwt_labels ## free up gpu
+
+            outputs = torch.squeeze(outputs, dim=1)
+            ## fft loss
+            output_spec = torch.fft.fftn(outputs, dim=(-2, -1)).type(torch.complex64)
+            target_spec_labels = torch.from_numpy(target_spec[i : i+batch_size]).to(device)
+            fft_mse = torch.mean(torch.absolute(output_spec - target_spec_labels)**2)
+            running_fft_loss += fft_mse*sz
+            loss += fft_mse * fft_wt
+            del output_spec, target_spec_labels ## free up gpu
+            del outputs
             
             loss.backward()
             optimizer.step()
-            output_spec = output_spec.cpu().detach().numpy()[:,0,:,:]
 
-            train_output[i : i+batch_size] = outputs
-            running_loss += loss.item()*len(inputs)
+            running_loss += loss.item()*sz
             i += batch_size
 
-        running_loss = running_loss / len(train_X)
-        rrmse_train = rrmse(train_img, train_output)
-        running_freq_loss /= len(train_X)
-        loss_history.append(running_loss)
+        running_loss /= len(train_X)
+        running_fft_loss /= len(train_X)
+        running_dtcwt_loss /= len(train_X)
+        train_loss_history.append(running_loss)
+
+        ## validation loss
+        running_valid_loss = 0.0
+        i = 0
+        model.eval()
+        with torch.no_grad():
+            while i < len(valid_X):
+                inputs = torch.from_numpy(valid_X[i : i+batch_size]).to(device)
+                labels = torch.from_numpy(valid_target_img[i : i+batch_size]).to(device)
+                sz = len(inputs)
+                outputs = model(inputs)
+                ## spatial loss
+                loss = torch.mean((outputs - labels)**2) * spatial_wt
+                del labels, inputs ## free up gpu
+                ## dtcwt loss
+                output_dtcwt = dtcwt_fn.forward(outputs)
+                target_dtcwt_labels = valid_target_dtcwt[0][i: i+batch_size].to(device)
+                dtcwt_loss = torch.mean(torch.absolute(output_dtcwt[0] - target_dtcwt_labels)**2)
+                for j in range(len(output_dtcwt[1])):
+                    target_dtcwt_labels = valid_target_dtcwt[1][j][i: i+batch_size].to(device)
+                    dtcwt_loss += torch.mean(torch.absolute(output_dtcwt[1][j] - target_dtcwt_labels)**2)
+                loss += dtcwt_loss * dtcwt_wt
+                del output_dtcwt, target_dtcwt_labels ## free up gpu
+                ## fft loss
+                outputs = torch.squeeze(outputs, dim=1)
+                output_spec = torch.fft.fftn(outputs, dim=(-2, -1)).type(torch.complex64)
+                target_spec_labels = torch.from_numpy(valid_target_spec[i : i+batch_size]).to(device)
+                fft_mse = torch.mean(torch.absolute(output_spec - target_spec_labels)**2)
+                loss += fft_mse * fft_wt
+                del output_spec, target_spec_labels ## free up gpu
+                del outputs
+
+                running_valid_loss += loss.item()*sz
+                i += batch_size
+
+        running_valid_loss /= len(valid_X)
+        valid_loss_history.append(running_valid_loss)
+
+        print("epoch %s, time = %.2f sec, losses: train = %.4f, fft = %.4f, dtcwt = %.4f, val = %.4f" %
+        (ep, time.time()-t2, running_loss, running_fft_loss, running_dtcwt_loss, running_valid_loss))
         
-        print("epoch %s loss = %.5f, time = %.2f sec, rrmse = %.4f, k-space mse = %.4f" %
-        (ep, running_loss, time.time()-t2, rrmse_train, running_freq_loss))
-        if (ep+1) % 10 == 0:
+        ## save best model
+        if ep==0 or running_valid_loss < min_valid_loss:
+            min_valid_loss = running_valid_loss
+            min_loss_ep = ep
             torch.save(model.state_dict(), model_path)
+        ## early stopping
+        if ep>20 and ep-min_loss_ep > early_stopping_tolerance:
+            print('Stopping early...')
+            break
                 
+    train_X, valid_X = train_X[:, 0, :, :], valid_X[:, 0, :, :]
 
-    print('Finished training, total time = %.1f min' % ((time.time()-t1)/60))
-    torch.save(model.state_dict(), model_path)
-    print('Model saved in %s' % model_path)
-
-    fig = plt.figure()
-    epoch_arr = list(np.arange(epochs))
-    plt.plot(epoch_arr[:20], loss_history[:20])
-    plt.savefig('%s_loss.png' % (model_path[:-4]))
-    plt.xlabel('epoch')
-    plt.ylabel('loss')
-    plt.title('%s %s %s' % (model_type, corr_type, lamb))
-    plt.tight_layout()
-    plt.close(fig)
+    print('\nFinished training, total time = %.1f min' % ((time.time()-t1)/60))
+    print('Model saved in %s\n' % model_path)
 
     #------------------------------------------------------
     # result metrics
@@ -182,30 +258,50 @@ def runner(corr_type, device_name, model_type, lamb=0, epochs=300, batch_size=64
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
-    def predict(input_imgs):
-        preds = np.zeros_like(input_imgs)
-        for i in range(0, len(input_imgs), batch_size):
-            inputs = input_imgs[i : i+batch_size][:, np.newaxis, :, :].astype(np.float32)
-            inputs = torch.from_numpy(inputs).to(device)
-            outputs = model(inputs).cpu().detach().numpy()
-            preds[i : i+batch_size, :, :] = outputs[:, 0, :, :]
-        return preds
+    print('Corruption type : %s, model type : %s, weights: spatial = %s, fft = %s, dtcwt = %s'
+    % (corr_type, model_type, spatial_wt, fft_wt, dtcwt_wt))
 
-    print('Corruption type : %s, lambda = %s, model type : %s' % (corr_type, lamb, model_type))
+    rrmse_data = {'train':{}, 'test':{}, 'valid':{}}
+    
+    train_output = predict(model, train_X, batch_size, device)
+    valid_output = predict(model, valid_X, batch_size, device)
+    test_output = predict(model, test_X, batch_size, device)
 
-    train_output = predict(train_X)
-    rrmse_inp, rrmse_out = rrmse(train_img, train_X), rrmse(train_img, train_output)
-    ssim_inp, ssim_out = ssim(train_img, train_X), ssim(train_img, train_output)
-    print("Train data")
-    print('rrmse input = %.4f, output = %.4f' % (rrmse_inp, rrmse_out))
-    print('ssim input = %.4f, output = %.4f' % (ssim_inp, ssim_out))
+    def print_metrics(f, metric_name):
+        metric_data = {'train':{}, 'test':{}, 'valid':{}}
+        metric_data['train']['input'] = f(train_img, train_X)
+        metric_data['train']['output'] = f(train_img, train_output)
+        
+        metric_data['valid']['input'] = f(valid_img, valid_X)
+        metric_data['valid']['output'] = f(valid_img, valid_output)
 
-    test_output = predict(test_X)
-    rrmse_inp, rrmse_out = rrmse(test_img, test_X), rrmse(test_img, test_output)
-    ssim_inp, ssim_out = ssim(test_img, test_X), ssim(test_img, test_output)
-    print("Test data")
-    print('rrmse input = %.4f, output = %.4f' % (rrmse_inp, rrmse_out))
-    print('ssim input = %.4f, output = %.4f' % (ssim_inp, ssim_out))
+        metric_data['test']['input'] = f(test_img, test_X)
+        metric_data['test']['output'] = f(test_img, test_output)
+
+        print('\t%s data' % metric_name)
+        print('\tInput\tOutput')
+        for data in ['Train', 'Valid', 'Test']:
+            print('%s\t%.4f\t%.4f' % (data, metric_data[data.lower()]['input'],
+                metric_data[data.lower()]['output']))
+    
+    print_metrics(rrmse, 'RRMSE')
+    print_metrics(ssim, 'SSIM')
+
+
+    ## plot loss history
+    fig = plt.figure()
+    epoch_arr = list(np.arange(1, epochs+1).astype(np.int))
+    plt.plot(epoch_arr[20:], train_loss_history[20:])
+    plt.plot(epoch_arr[20:], valid_loss_history[20:])
+    plt.legend(['train loss', 'valid loss'])
+    plt.xlabel('epoch')
+    plt.xticks(epoch_arr[20:])
+    plt.ylabel('loss')
+    plt.title('%s %s weights - spatial:%s, fft:%s, dtcwt:%s' %
+        (model_type, corr_type, spatial_wt, fft_wt, dtcwt_wt))
+    plt.tight_layout()
+    plt.savefig('%s_loss.png' % (model_path[:-4]))
+    plt.close(fig)
 
 corruption_params = {
     'high_1' : {
@@ -247,43 +343,52 @@ corruption_params = {
 }
 
 # %%
-runner('low_3', 'cuda:1', 'n2c', 1e-4, 20, 60)
+# runner('high_2', 'cuda:0', 'n2c', 0, 0, 1, 3, 64)
 
 # %%
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model_type", type=str, help="n2n or n2c")
 parser.add_argument("--device", type=str, help="free gpu - (cuda:id) or cpu")
-parser.add_argument("--lamb", type=float, help="regularization weight")
+parser.add_argument("--spatial_wt", type=float, help="spatial mse loss weight")
+parser.add_argument("--fft_wt", type=float, help="fourier mse loss weight")
+parser.add_argument("--dtcwt_wt", type=float, help="wavelet mse loss weight")
 args = parser.parse_args()
 
 device_name = args.device
 model_type = args.model_type
-lamb = args.lamb
+spatial_wt = args.spatial_wt
+fft_wt = args.fft_wt
+dtcwt_wt = args.dtcwt_wt
 
-if device_name is None or model_type is None or lamb is None:
+if device_name is None or model_type is None:
     print("device, model_type, lamb needed")
     exit()
 batch_size = 64
 epochs = 300
 
 ### under + noise
-print('\n---------------------------')
-runner('low_1', device_name, model_type, lamb, epochs, batch_size)
-print('\n---------------------------')
-runner('high_1', device_name, model_type, lamb, epochs, batch_size)
+# print('\n---------------------------')
+# runner('low_1', device_name, model_type, lamb, epochs, batch_size)
+# print('\n---------------------------')
+# runner('high_1', device_name, model_type, lamb, epochs, batch_size)
 
 ### noise
 print('\n---------------------------')
-runner('low_2', device_name, model_type, lamb, epochs, batch_size)
+runner('low_2', device_name, model_type, 100, 0, 0, epochs, batch_size)
 print('\n---------------------------')
-runner('high_2', device_name, model_type, lamb, epochs, batch_size)
+runner('high_2', device_name, model_type, 100, 0, 0, epochs, batch_size)
+
+print('\n---------------------------')
+runner('low_2', device_name, model_type, 0, 1, 0, epochs, batch_size)
+print('\n---------------------------')
+runner('high_2', device_name, model_type, 0, 1, 0, epochs, batch_size)
 
 ## under
-print('\n---------------------------')
-runner('low_3', device_name, model_type, lamb, epochs, batch_size)
-print('\n---------------------------')
-runner('high_3', device_name, model_type, lamb, epochs, batch_size)
+# print('\n---------------------------')
+# runner('low_3', device_name, model_type, lamb, epochs, batch_size)
+# print('\n---------------------------')
+# runner('high_3', device_name, model_type, lamb, epochs, batch_size)
 
 
 
