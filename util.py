@@ -5,6 +5,14 @@ import random
 import PIL.Image
 import torch
 
+def fftshift2d_torch(x, ifft=False):
+    assert (len(x.shape) == 2) and all([(s % 2 == 1) for s in x.shape])
+    s0 = (x.shape[0] // 2) + (0 if ifft else 1)
+    s1 = (x.shape[1] // 2) + (0 if ifft else 1)
+    x = torch.cat([x[s0:, :], x[:s0, :]], dim=0)
+    x = torch.cat([x[:, s1:], x[:, :s1]], dim=1)
+    return x
+
 def corrupt_data_gaussian(img, spec, params):
     rows = spec.shape[0]
     central_band = params['central_band']
@@ -25,12 +33,15 @@ def corrupt_data_gaussian(img, spec, params):
     noise *= np.sqrt(variance/2)
 
     corrupt_spec = np.fft.fftshift(spec) + noise
-    corrupt_spec[undersample_rows] = (1 + 1j)*(1e-5)
+    fft_mask = np.ones_like(corrupt_spec)
+    fft_mask[undersample_rows] = 0
+    corrupt_spec = corrupt_spec * fft_mask
     corrupt_spec = np.fft.ifftshift(corrupt_spec)
-    corrupt_img = np.real(np.fft.ifft2(corrupt_spec)).astype(np.float32)
+    fft_mask = np.fft.ifftshift(fft_mask)
+    corrupt_img = np.absolute(np.fft.ifft2(corrupt_spec)).astype(np.float32)
     corrupt_img = np.clip(corrupt_img, 0.0, 1.0)
 
-    return corrupt_img, corrupt_spec, undersample_rows
+    return corrupt_img, corrupt_spec, fft_mask
 
 def predict(model, input_imgs, batch_size, device):
     preds = np.zeros_like(input_imgs)
