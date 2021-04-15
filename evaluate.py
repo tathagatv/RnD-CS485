@@ -1,6 +1,7 @@
 # %%
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+import pandas as pd
 import torch
 import scipy
 import numpy as np
@@ -16,7 +17,7 @@ from skimage.metrics import structural_similarity as ssim
 import random
 import argparse
 from unet import UNet
-from util import corrupt_data_gaussian, rrmse, load_dataset
+from util import corrupt_data_gaussian, rrmse, load_dataset, predict
 
 np.random.seed(0)
 random.seed(0)
@@ -29,9 +30,11 @@ def fftshift2d(x, ifft=False):
     x = np.concatenate([x[:, s1:], x[:, :s1]], axis=1)
     return x
 
-dataset_train, dataset_test = dict(), dict()
-train_img, train_spec = load_dataset('ixi_train.pkl', num_images=1000)
-test_img, test_spec = load_dataset('ixi_valid.pkl', num_images=200)
+train_sz, valid_sz, test_sz = 800, 200, 200
+train_img, train_spec = load_dataset('ixi_train.pkl', num_images=train_sz+valid_sz)
+test_img, test_spec = load_dataset('ixi_valid.pkl', num_images=test_sz)
+valid_img, valid_spec = train_img[train_sz:, :, :], train_spec[train_sz:, :, :]
+train_img, train_spec = train_img[:train_sz, :, :], train_spec[:train_sz, :, :]
 model_folder = 'trained_model'
 img_folder = 'img'
 
@@ -55,7 +58,7 @@ def create_noisy_data(cor_params):
         test_Y[i], test_Y_spec[i], r = corrupt_data_gaussian(0, test_spec[i], cor_params)
 
     print('time for making corrupted data = %.2f sec' % (time.time()-t1))
-    print('fraction of k-space maintained = %.4f' % (1 - len(r)/test_Y_spec.shape[1]))
+    print('fraction of k-space maintained = %.4f' % (np.sum(r)/np.sum(r>=0)))
     print("rrmse input train = %.4f, test = %.4f" % (rrmse(train_img, train_X), rrmse(test_img, test_X)))
     print("ssim input train = %.4f, test = %.4f" % (ssim(train_img, train_X), ssim(test_img, test_X)))
     return train_X, train_Y, test_X, test_Y
@@ -71,15 +74,6 @@ def define_load_model(model_path, device_name):
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     return model
-
-def predict(model, input_imgs, batch_size = 32):
-    preds = np.zeros_like(input_imgs)
-    for i in range(0, len(input_imgs), batch_size):
-        inputs = input_imgs[i : i+batch_size][:, np.newaxis, :, :].astype(np.float32)
-        inputs = torch.from_numpy(inputs).to(device)
-        outputs = model(inputs).cpu().detach().numpy()
-        preds[i : i+batch_size, :, :] = outputs[:, 0, :, :]
-    return preds
 
 def rrmse_list(arrX, arrY):
     assert arrX.shape == arrY.shape
@@ -113,6 +107,7 @@ def plot_img(img_arr, img_name_arr, name, idx, title, save_img=False, cmap='gray
         h = ax.imshow(im_rotated, cmap=cmap,vmin=0, vmax=1)
         ax.autoscale(False)
         ax.set_title(sub_title)
+        ax.axis('off')
         divider = make_axes_locatable(ax)
         cax = divider.append_axes("right", size="5%", pad=0.05)
         fig.colorbar(h, cax=cax)
@@ -126,45 +121,48 @@ def plot_img(img_arr, img_name_arr, name, idx, title, save_img=False, cmap='gray
         plt.savefig(os.path.join(img_folder, "%s_%d.png" % (name, idx)), bbox_inches='tight')
     plt.close(fig)
 
+def create_rrmse_data(device_name):
 
-def create_rrmse_data(corr_type, noise_desc, lamb, device_name):
-    cor_params = corruption_params[corr_type]
+    dtcwt_wts = [0.0, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
+    dtcwt_wts = [0.0, 2e-7, 4e-7, 6e-7, 8e-7, 1e-6, 2e-6, 4e-6, 6e-6, 8e-6, 1e-5]
+    dtcwt_wts = [0.001, 0.002, 0.004, 0.006, 0.008, 0.01]
 
-    print('\n------------------------')
-    print("Corruption type: %s, lambda = %s" % (noise_desc, lamb))
-    train_X, train_Y, test_X, test_Y = create_noisy_data(cor_params)
-    rrmse_train_input, rrmse_test_input = rrmse_list(train_img, train_X), rrmse_list(test_img, test_X)
-    
-    model_file = '%s_%s' % (corr_type, lamb)
-    ## n2n predictions
-    model = define_load_model(os.path.join(model_folder,"n2n_%s.pth" % model_file), device_name)
-    train_output_n2n, test_output_n2n = predict(model, train_X), predict(model, test_X)
-    rrmse_train_n2n, rrmse_test_n2n = rrmse_list(train_img, train_output_n2n), rrmse_list(test_img, test_output_n2n)
-    print("rrmse n2n train = %.4f, test = %.4f" % (rrmse(train_img, train_output_n2n), rrmse(test_img, test_output_n2n)))
-    print("ssim n2n train = %.4f, test = %.4f" % (ssim(train_img, train_output_n2n), ssim(test_img, test_output_n2n)))
-    
-    ## n2c predictions
-    model = define_load_model(os.path.join(model_folder,"n2c_%s.pth" % model_file), device_name)
-    train_output_n2c, test_output_n2c = predict(model, train_X), predict(model, test_X)
-    rrmse_train_n2c, rrmse_test_n2c = rrmse_list(train_img, train_output_n2c), rrmse_list(test_img, test_output_n2c)
-    print("rrmse n2c train = %.4f, test = %.4f" % (rrmse(train_img, train_output_n2c), rrmse(test_img, test_output_n2c)))
-    print("ssim n2c train = %.4f, test = %.4f" % (ssim(train_img, train_output_n2c), ssim(test_img, test_output_n2c)))
+    df = {
+        'noise_level':[],
+        'spatial_wt':[],
+        'fft_wt':[],
+        'dtcwt_wt':[],
+        'rrmse':[]
+    }
+
+    for corr_type in ['low_3']:
+        cor_params = corruption_params[corr_type]
+        train_X, train_Y, test_X, test_Y = create_noisy_data(cor_params)
+        df['noise_level'].append(corr_type)
+        df['spatial_wt'].append(None)
+        df['fft_wt'].append(None)
+        df['dtcwt_wt'].append(None)
+        df['rrmse'].append(rrmse(test_img, test_X))
+        for dt in dtcwt_wts:
+            model_file = 'n2c_%s_%s_%s_%s.pth' % (corr_type, 0, 1, dt)
+            model = define_load_model(os.path.join(model_folder, model_file), device_name)
+            test_output = predict(model, test_X, 32, device)
+            df['noise_level'].append(corr_type)
+            df['spatial_wt'].append(0)
+            df['fft_wt'].append(1)
+            df['dtcwt_wt'].append(dt)
+            df['rrmse'].append(rrmse(test_img, test_output))
+    df = pd.DataFrame(df)
+    df.to_csv('n2c_rrmse_dtcwt.csv')
+                    
 
     ## sample prediction images
-    for idx in [34, 97]:
-        img_arr = [test_img[idx], test_X[idx], test_output_n2n[idx], test_output_n2c[idx]]
-        img_name_arr = ['Clean', 'Noisy input', 'N2N', 'N2C']
-        plot_img(img_arr, img_name_arr, 'pred_%s' % model_file,
-            idx, 'Predictions on %s corruption, lambda = %s' % (noise_desc, lamb), True)
+    # for idx in [34]:
+    #     img_arr = [test_img[idx], test_X[idx], test_output_n2n[idx], test_output_n2c[idx]]
+    #     img_name_arr = ['Clean', 'Noisy input', 'N2N', 'N2C']
+    #     plot_img(img_arr, img_name_arr, 'pred_%s' % model_file,
+    #         idx, 'Predictions on %s corruption, lambda = %s' % (noise_desc, lamb), True)
     
-    ## boxplot
-    # f = plt.figure()
-    # plt.boxplot((rrmse_test_input, rrmse_test_n2n, rrmse_test_n2c),
-    #     labels=('test input', 'n2n test', 'n2c test'), notch=True)
-    # plt.title(plot_title)
-    # plt.ylabel('RRMSE')
-    # plt.savefig(os.path.join(img_folder,"boxplot_%s.png" % model_file))
-    # plt.close(f)
 
 
 corruption_params = {
@@ -207,7 +205,59 @@ corruption_params = {
 }
 
 # %%
-# create_rrmse_data('low_2', 'Noise low', 1e-5, 'cuda:1')
+create_rrmse_data('cuda:0')
+
+
+# %%
+corr_type = 'low_3'
+train_X, train_Y, test_X, test_Y = create_noisy_data(corruption_params[corr_type])
+device_name = 'cuda:1'
+
+# %%
+model_file = '%s_%s_%s_%s' % (corr_type, 0, 1, 0.0)
+model = define_load_model(os.path.join(model_folder,"n2c_%s.pth" % model_file), device_name)
+test_output_fft = predict(model, test_X, 32, device)
+
+model_file = '%s_%s_%s_%s' % (corr_type, 0, 1, 1e-2)
+model = define_load_model(os.path.join(model_folder,"n2c_%s.pth" % model_file), device_name)
+test_output_dt = predict(model, test_X, 32, device)
+
+print(rrmse(test_img, test_output_dt))
+print(rrmse(test_img, test_output_fft))
+
+# %%
+%matplotlib inline
+def p1(r):
+    # return r
+    # return r[60:200, 40:170]
+    return r[100:220, 180:300]
+plt.figure()
+plt.imshow(p1(test_X[34]), cmap='gray')
+# plt.axis('off')
+plt.show()
+print(rrmse(test_img[34], test_X[34]))
+plt.figure()
+plt.imshow(p1(test_output_fft[34]), cmap='gray')
+# plt.axis('off')
+plt.show()
+print(rrmse(test_img[34], test_output_fft[34]))
+plt.figure()
+plt.imshow(p1(test_output_dt[34]), cmap='gray')
+# plt.axis('off')
+plt.show()
+print(rrmse(test_img[34], test_output_dt[34]))
+plt.figure()
+plt.imshow(p1(test_img[34]), cmap='gray')
+# plt.axis('off')
+plt.show()
+
+
+img_arr = [test_img[34], test_X[34], test_output_fft[34], test_output_dt[34]]
+img_arr = list(map(p1, img_arr))
+img_name_arr = ['Clean', 'Noisy input', 'fft loss', 'fft + wavelet reg']
+plot_img(img_arr, img_name_arr, 'pred_%s' % model_file,
+    34, 'Predictions on k-space subsample corruption, dtcwt_wt = %s' % (1e-6), True)
+
 
 # %%
 
@@ -229,30 +279,5 @@ create_rrmse_data('high_2', 'Noise high', lamb, device_name)
 create_rrmse_data('low_2', 'Noise low', lamb, device_name)
 create_rrmse_data('high_3', 'Undersample high', lamb, device_name)
 create_rrmse_data('low_3', 'Undersample low', lamb, device_name)
-
-
-# %%
-# %matplotlib inline
-def avg_img(cor_params, num_samples, idx, title):
-    avg_im = np.zeros_like(test_img[idx])
-    rrmse_hst = []
-    sample_hst = []
-    for i in range(1, num_samples+1):
-        im, sp = corrupt_data_gaussian(0, test_spec[idx], cor_params)
-        avg_im += im
-        rrmse_hst.append(rrmse(test_img[idx], avg_im/i))
-        sample_hst.append(i)
-    f = plt.figure()
-    plt.plot(sample_hst, rrmse_hst)
-    plt.ylabel('RRMSE')
-    plt.xlabel('number of samples')
-    plt.title(title)
-    plt.show()
-    plt.close(f)
-
-# avg_img(corruption_high_params3, 1600, 34, 'undersample only high')
-# avg_img(corruption_high_params2, 1600, 34, 'noise only high')
-# avg_img(corruption_high_params1, 1600, 34, 'undersample + noise high')
-
 
 # %%

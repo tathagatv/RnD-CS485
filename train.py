@@ -16,20 +16,11 @@ import random
 import argparse
 import matplotlib.pyplot as plt
 from unet import UNet
-from util import corrupt_data_gaussian, rrmse, load_dataset, predict
+from util import corrupt_data_gaussian, rrmse, load_dataset, predict, fftshift2d_torch
 from pytorch_wavelets import DTCWTForward, DTCWTInverse
 
 np.random.seed(0)
 random.seed(0)
-
-
-def fftshift2d_torch(x, ifft=False):
-    assert (len(x.shape) == 2) and all([(s % 2 == 1) for s in x.shape])
-    s0 = (x.shape[0] // 2) + (0 if ifft else 1)
-    s1 = (x.shape[1] // 2) + (0 if ifft else 1)
-    x = torch.cat([x[s0:, :], x[:s0, :]], dim=0)
-    x = torch.cat([x[:, s1:], x[:, :s1]], dim=1)
-    return x
 
 # %%
 #----------------------------------------------------------------------------
@@ -73,33 +64,33 @@ def runner(corr_type, device_name, model_type, spatial_wt=1, fft_wt=0, dtcwt_wt=
     
     train_X, train_Y = np.zeros_like(train_img), np.zeros_like(train_img)
     train_X_spec, train_Y_spec = np.zeros_like(train_spec), np.zeros_like(train_spec)
-    train_X_rows, train_Y_rows = [0]*train_img.shape[0], [0]*train_img.shape[0]
+    train_X_mask, train_Y_mask = np.zeros_like(train_spec), np.zeros_like(train_spec)
     
     valid_X, valid_Y = np.zeros_like(valid_img), np.zeros_like(valid_img)
     valid_X_spec, valid_Y_spec = np.zeros_like(valid_spec), np.zeros_like(valid_spec)
-    valid_X_rows, valid_Y_rows = [0]*valid_img.shape[0], [0]*valid_img.shape[0]
+    valid_X_mask, valid_Y_mask = np.zeros_like(valid_spec), np.zeros_like(valid_spec)
 
     test_X = np.zeros_like(test_img)
     test_X_spec = np.zeros_like(test_spec)
-    test_X_rows = [0]*test_img.shape[0]
+    test_X_mask = np.zeros_like(test_spec)
 
     t1 = time.time()
     for i in range(train_img.shape[0]):
-        train_X[i], train_X_spec[i], train_X_rows[i] = corrupt_data_gaussian(0, train_spec[i], cor_params)
-        train_Y[i], train_Y_spec[i], train_Y_rows[i] = corrupt_data_gaussian(0, train_spec[i], cor_params)
+        train_X[i], train_X_spec[i], train_X_mask[i] = corrupt_data_gaussian(0, train_spec[i], cor_params)
+        train_Y[i], train_Y_spec[i], train_Y_mask[i] = corrupt_data_gaussian(0, train_spec[i], cor_params)
 
     for i in range(valid_img.shape[0]):
-        valid_X[i], valid_X_spec[i], valid_X_rows[i] = corrupt_data_gaussian(0, valid_spec[i], cor_params)
-        valid_Y[i], valid_Y_spec[i], valid_Y_rows[i] = corrupt_data_gaussian(0, valid_spec[i], cor_params)
+        valid_X[i], valid_X_spec[i], valid_X_mask[i] = corrupt_data_gaussian(0, valid_spec[i], cor_params)
+        valid_Y[i], valid_Y_spec[i], valid_Y_mask[i] = corrupt_data_gaussian(0, valid_spec[i], cor_params)
 
     for i in range(test_img.shape[0]):
-        test_X[i], test_X_spec[i], test_X_rows[i] = corrupt_data_gaussian(0, test_spec[i], cor_params)
+        test_X[i], test_X_spec[i], test_X_mask[i] = corrupt_data_gaussian(0, test_spec[i], cor_params)
 
     train_output, valid_output, test_output = np.zeros_like(train_X), np.zeros_like(valid_X), np.zeros_like(test_X)
 
     print('time for corrupting data = %.2f sec' % (time.time()-t1))
     print("RRMSE train, test inputs = %.4f, %.4f" % (rrmse(train_img, train_X), rrmse(test_img, test_X)))
-    # print("SSIM train, test inputs = %.4f, %.4f" % (ssim(train_img, train_X), ssim(test_img, test_X)))
+    print("SSIM train, test inputs = %.4f, %.4f" % (ssim(train_img, train_X), ssim(test_img, test_X)))
     print('data loading done')
 
     ## create model
@@ -124,15 +115,15 @@ def runner(corr_type, device_name, model_type, spatial_wt=1, fft_wt=0, dtcwt_wt=
     print('Model file name: %s' % model_path)
 
     ## set target images and spectrum
-    target_img, target_spec, target_rows = 0, 0, 0
-    valid_target_img, valid_target_spec, valid_target_rows = 0, 0, 0
+    target_img, target_spec, target_mask = 0, 0, 0
+    valid_target_img, valid_target_spec, valid_target_mask = 0, 0, 0
     if model_type == 'n2c':
-        target_img, target_spec, target_rows = train_img, train_spec, [[]]*len(train_img)
-        valid_target_img, valid_target_spec, valid_target_rows = valid_img, valid_spec, [[]]*len(valid_img)
+        target_img, target_spec, target_mask = train_img, train_spec, np.ones_like(train_spec)
+        valid_target_img, valid_target_spec, valid_target_mask = valid_img, valid_spec, np.ones_like(valid_spec)
         target_dtcwt, valid_target_dtcwt = train_dtcwt, valid_dtcwt
     elif model_type == 'n2n':
-        target_img, target_spec, target_rows = train_Y, train_Y_spec, train_Y_rows
-        valid_target_img, valid_target_spec, valid_target_rows = valid_Y, valid_Y_spec, valid_Y_rows
+        target_img, target_spec, target_mask = train_Y, train_Y_spec, train_Y_mask
+        valid_target_img, valid_target_spec, valid_target_mask = valid_Y, valid_Y_spec, valid_Y_mask
         target_dtcwt, valid_target_dtcwt = train_dtcwt, valid_dtcwt
 
     t1 = time.time()
@@ -167,24 +158,29 @@ def runner(corr_type, device_name, model_type, spatial_wt=1, fft_wt=0, dtcwt_wt=
 
             ## dtcwt loss
             output_dtcwt = dtcwt_fn.forward(outputs)
-            target_dtcwt_labels = target_dtcwt[0][i: i+batch_size].to(device)
-            dtcwt_loss = torch.mean(torch.absolute(output_dtcwt[0] - target_dtcwt_labels)**2)
+            # target_dtcwt_labels = target_dtcwt[0][i: i+batch_size].to(device)
+            # dtcwt_mse = torch.mean(torch.absolute(output_dtcwt[0] - target_dtcwt_labels)**2)
+            dtcwt_loss = torch.sum(torch.absolute(output_dtcwt[0]))
             for j in range(len(output_dtcwt[1])):
-                target_dtcwt_labels = target_dtcwt[1][j][i: i+batch_size].to(device)
-                dtcwt_loss += torch.mean(torch.absolute(output_dtcwt[1][j] - target_dtcwt_labels)**2)
+                # target_dtcwt_labels = target_dtcwt[1][j][i: i+batch_size].to(device)
+                # dtcwt_mse += torch.mean(torch.absolute(output_dtcwt[1][j] - target_dtcwt_labels)**2)
+                dtcwt_loss += torch.sum(torch.absolute(output_dtcwt[1][j]))
+            dtcwt_loss /= sz
             running_dtcwt_loss += dtcwt_loss * sz
             loss += dtcwt_loss * dtcwt_wt
-            del output_dtcwt, target_dtcwt_labels ## free up gpu
+            del output_dtcwt ## free up gpu
 
             outputs = torch.squeeze(outputs, dim=1)
             ## fft loss
             output_spec = torch.fft.fftn(outputs, dim=(-2, -1)).type(torch.complex64)
+            del outputs ## free up gpu
             target_spec_labels = torch.from_numpy(target_spec[i : i+batch_size]).to(device)
-            fft_mse = torch.mean(torch.absolute(output_spec - target_spec_labels)**2)
+            fft_mask = torch.from_numpy(target_mask[i : i+batch_size]).to(device)
+            fft_mse = torch.mean(torch.absolute(
+                (output_spec - target_spec_labels)*fft_mask)**2)
             running_fft_loss += fft_mse*sz
             loss += fft_mse * fft_wt
-            del output_spec, target_spec_labels ## free up gpu
-            del outputs
+            del output_spec, target_spec_labels, fft_mask ## free up gpu
             
             loss.backward()
             optimizer.step()
@@ -212,21 +208,26 @@ def runner(corr_type, device_name, model_type, spatial_wt=1, fft_wt=0, dtcwt_wt=
                 del labels, inputs ## free up gpu
                 ## dtcwt loss
                 output_dtcwt = dtcwt_fn.forward(outputs)
-                target_dtcwt_labels = valid_target_dtcwt[0][i: i+batch_size].to(device)
-                dtcwt_loss = torch.mean(torch.absolute(output_dtcwt[0] - target_dtcwt_labels)**2)
+                # target_dtcwt_labels = valid_target_dtcwt[0][i: i+batch_size].to(device)
+                # dtcwt_loss = torch.mean(torch.absolute(output_dtcwt[0] - target_dtcwt_labels)**2)
+                dtcwt_loss = torch.sum(torch.absolute(output_dtcwt[0]))
                 for j in range(len(output_dtcwt[1])):
-                    target_dtcwt_labels = valid_target_dtcwt[1][j][i: i+batch_size].to(device)
-                    dtcwt_loss += torch.mean(torch.absolute(output_dtcwt[1][j] - target_dtcwt_labels)**2)
+                    # target_dtcwt_labels = valid_target_dtcwt[1][j][i: i+batch_size].to(device)
+                    # dtcwt_loss += torch.mean(torch.absolute(output_dtcwt[1][j] - target_dtcwt_labels)**2)
+                    dtcwt_loss += torch.sum(torch.absolute(output_dtcwt[1][j]))
+                dtcwt_loss /= sz
                 loss += dtcwt_loss * dtcwt_wt
-                del output_dtcwt, target_dtcwt_labels ## free up gpu
+                del output_dtcwt ## free up gpu
                 ## fft loss
                 outputs = torch.squeeze(outputs, dim=1)
                 output_spec = torch.fft.fftn(outputs, dim=(-2, -1)).type(torch.complex64)
+                del outputs ## free up gpu
                 target_spec_labels = torch.from_numpy(valid_target_spec[i : i+batch_size]).to(device)
-                fft_mse = torch.mean(torch.absolute(output_spec - target_spec_labels)**2)
+                fft_mask = torch.from_numpy(valid_target_mask[i : i+batch_size]).to(device)
+                fft_mse = torch.mean(torch.absolute(
+                    (output_spec - target_spec_labels)*fft_mask)**2)
                 loss += fft_mse * fft_wt
-                del output_spec, target_spec_labels ## free up gpu
-                del outputs
+                del output_spec, target_spec_labels, fft_mask ## free up gpu
 
                 running_valid_loss += loss.item()*sz
                 i += batch_size
@@ -234,8 +235,9 @@ def runner(corr_type, device_name, model_type, spatial_wt=1, fft_wt=0, dtcwt_wt=
         running_valid_loss /= len(valid_X)
         valid_loss_history.append(running_valid_loss)
 
-        print("epoch %s, time = %.2f sec, losses: train = %.4f, fft = %.4f, dtcwt = %.4f, val = %.4f" %
-        (ep, time.time()-t2, running_loss, running_fft_loss, running_dtcwt_loss, running_valid_loss))
+        if ep%30 == 0:
+            print("epoch %s, time = %.2f sec, losses: train = %.4f, fft = %.4f, dtcwt = %.4f, val = %.4f" %
+            (ep, time.time()-t2, running_loss, running_fft_loss, running_dtcwt_loss, running_valid_loss))
         
         ## save best model
         if ep==0 or running_valid_loss < min_valid_loss:
@@ -243,9 +245,9 @@ def runner(corr_type, device_name, model_type, spatial_wt=1, fft_wt=0, dtcwt_wt=
             min_loss_ep = ep
             torch.save(model.state_dict(), model_path)
         ## early stopping
-        if ep>20 and ep-min_loss_ep > early_stopping_tolerance:
-            print('Stopping early...')
-            break
+        # if ep>60 and ep-min_loss_ep > early_stopping_tolerance:
+        #     print('Stopping early...total epochs = %d' % ep)
+        #     break
                 
     train_X, valid_X = train_X[:, 0, :, :], valid_X[:, 0, :, :]
 
@@ -260,8 +262,6 @@ def runner(corr_type, device_name, model_type, spatial_wt=1, fft_wt=0, dtcwt_wt=
 
     print('Corruption type : %s, model type : %s, weights: spatial = %s, fft = %s, dtcwt = %s'
     % (corr_type, model_type, spatial_wt, fft_wt, dtcwt_wt))
-
-    rrmse_data = {'train':{}, 'test':{}, 'valid':{}}
     
     train_output = predict(model, train_X, batch_size, device)
     valid_output = predict(model, valid_X, batch_size, device)
@@ -287,20 +287,20 @@ def runner(corr_type, device_name, model_type, spatial_wt=1, fft_wt=0, dtcwt_wt=
     print_metrics(rrmse, 'RRMSE')
     print_metrics(ssim, 'SSIM')
 
-
     ## plot loss history
+    loss_history_img = 'loss_history_img'
     fig = plt.figure()
-    epoch_arr = list(np.arange(1, epochs+1).astype(np.int))
-    plt.plot(epoch_arr[20:], train_loss_history[20:])
-    plt.plot(epoch_arr[20:], valid_loss_history[20:])
+    epoch_arr = list(range(1, len(train_loss_history)+1))
+    init_offset = 0
+    plt.plot(epoch_arr[init_offset:], train_loss_history[init_offset:])
+    plt.plot(epoch_arr[init_offset:], valid_loss_history[init_offset:])
     plt.legend(['train loss', 'valid loss'])
     plt.xlabel('epoch')
-    plt.xticks(epoch_arr[20:])
     plt.ylabel('loss')
     plt.title('%s %s weights - spatial:%s, fft:%s, dtcwt:%s' %
         (model_type, corr_type, spatial_wt, fft_wt, dtcwt_wt))
     plt.tight_layout()
-    plt.savefig('%s_loss.png' % (model_path[:-4]))
+    plt.savefig(os.path.join(loss_history_img, '%s_loss.png' % (os.path.split(model_path)[-1][:-4])))
     plt.close(fig)
 
 corruption_params = {
@@ -343,7 +343,7 @@ corruption_params = {
 }
 
 # %%
-# runner('high_2', 'cuda:0', 'n2c', 0, 0, 1, 3, 64)
+# runner('high_3', 'cuda:1', 'n2c', 0, 1, 0.0, 3, 50)
 
 # %%
 
@@ -353,6 +353,7 @@ parser.add_argument("--device", type=str, help="free gpu - (cuda:id) or cpu")
 parser.add_argument("--spatial_wt", type=float, help="spatial mse loss weight")
 parser.add_argument("--fft_wt", type=float, help="fourier mse loss weight")
 parser.add_argument("--dtcwt_wt", type=float, help="wavelet mse loss weight")
+parser.add_argument("--noise_type", type=str, help="[high/low]_[1/2/3]")
 args = parser.parse_args()
 
 device_name = args.device
@@ -360,35 +361,21 @@ model_type = args.model_type
 spatial_wt = args.spatial_wt
 fft_wt = args.fft_wt
 dtcwt_wt = args.dtcwt_wt
+noise_type = args.noise_type
 
-if device_name is None or model_type is None:
-    print("device, model_type, lamb needed")
+if device_name is None or model_type not in ['n2n', 'n2c']:
+    print("device, model_type, noise_type needed")
     exit()
-batch_size = 64
-epochs = 300
+batch_size = 50
+epochs = 200
 
-### under + noise
-# print('\n---------------------------')
-# runner('low_1', device_name, model_type, lamb, epochs, batch_size)
-# print('\n---------------------------')
-# runner('high_1', device_name, model_type, lamb, epochs, batch_size)
+dtcwt_wts = [0.0, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
+dtcwt_wts = np.linspace(1e-7, 1e-6, 4)
 
-### noise
+# for noise_type in ['high_3', 'low_3']:
+#     for dt in dtcwt_wts:
+#         print('\n---------------------------')
+#         runner(noise_type, device_name, model_type, 0, 1, dt, epochs, batch_size)
 print('\n---------------------------')
-runner('low_2', device_name, model_type, 100, 0, 0, epochs, batch_size)
-print('\n---------------------------')
-runner('high_2', device_name, model_type, 100, 0, 0, epochs, batch_size)
-
-print('\n---------------------------')
-runner('low_2', device_name, model_type, 0, 1, 0, epochs, batch_size)
-print('\n---------------------------')
-runner('high_2', device_name, model_type, 0, 1, 0, epochs, batch_size)
-
-## under
-# print('\n---------------------------')
-# runner('low_3', device_name, model_type, lamb, epochs, batch_size)
-# print('\n---------------------------')
-# runner('high_3', device_name, model_type, lamb, epochs, batch_size)
-
-
+runner(noise_type, device_name, model_type, 0, 1, dtcwt_wt, epochs, batch_size)
 
