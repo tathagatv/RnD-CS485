@@ -53,6 +53,13 @@ def predict(model, input_imgs, batch_size, device):
             preds[i : i+batch_size, :, :] = outputs[:, 0, :, :]
     return preds
 
+def gram(x):
+    (bs, ch, h, w) = x.size()
+    f = x.view(bs, ch, w*h)
+    f_T = f.transpose(1, 2)
+    G = f.bmm(f_T) / (ch * h * w)
+    return G
+
 def rrmse(arrX, arrY):
     v = np.square(arrX - arrY).sum()
     v /= np.square(arrX).sum()
