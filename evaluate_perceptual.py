@@ -37,7 +37,7 @@ test_img, test_spec = load_dataset('ixi_valid.pkl', num_images=test_sz)
 valid_img, valid_spec = train_img[train_sz:, :, :], train_spec[train_sz:, :, :]
 train_img, train_spec = train_img[:train_sz, :, :], train_spec[:train_sz, :, :]
 model_folder = 'trained_model_perceptual'
-model_folder = 'trained_perceptual_backup'
+# model_folder = 'trained_perceptual_backup'
 img_folder = 'img_perceptual'
 if not os.path.isdir(img_folder):
     os.mkdir(img_folder)
@@ -209,10 +209,10 @@ corruption_params = {
 # %%
 corr_type = 'low_3'
 train_X, train_Y, test_X, test_Y = create_noisy_data(corruption_params[corr_type])
-device_name = 'cuda:1'
+device_name = 'cuda:5'
 
 # %%
-model_file = '%s_%s_%s_%s' % (corr_type, 1e2, 1e3, 0)
+model_file = '%s_%s_%s_%s_%s' % (corr_type, 1e3, 1e-3, 1e-1, 32)
 model = define_load_model(os.path.join(model_folder,"n2c_%s.pth" % model_file), device_name)
 test_output = predict(model, test_X, 32, device)
 train_output = predict(model, train_X, 32, device)
@@ -224,9 +224,10 @@ train_output = predict(model, train_X, 32, device)
 # print(rrmse(test_img, test_output_dt))
 print('test rrmse: %.4f, train rrmse: %.4f' % (rrmse(test_img, test_output), rrmse(train_img, train_output)))
 print('test ssim: %.4f, train ssim: %.4f' % (ssim(test_img, test_output), ssim(train_img, train_output)))
+exit(0)
 
 # %%
-%matplotlib inline
+# %matplotlib inline
 def p1(r):
     return r
     # return r[60:200, 40:170]

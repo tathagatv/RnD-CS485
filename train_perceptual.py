@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 from unet import UNet
 from util import corrupt_data_gaussian, rrmse, load_dataset, predict, fftshift2d_torch, gram
 from vgg import Vgg16
+from pytorch_msssim import ssim as torch_ssim
 
 np.random.seed(0)
 random.seed(0)
@@ -27,8 +28,8 @@ random.seed(0)
 # Dataset loader
 
 train_sz, valid_sz, test_sz = 800, 200, 200
-train_sz, valid_sz, test_sz = 600, 120, 120
-train_sz, valid_sz, test_sz = 200, 100, 100
+# train_sz, valid_sz, test_sz = 600, 120, 120
+# train_sz, valid_sz, test_sz = 200, 100, 100
 train_img, train_spec = load_dataset('ixi_train.pkl', num_images=train_sz+valid_sz)
 test_img, test_spec = load_dataset('ixi_valid.pkl', num_images=test_sz)
 valid_img, valid_spec = train_img[train_sz:, :, :], train_spec[train_sz:, :, :]
@@ -40,7 +41,7 @@ if not os.path.isdir(model_folder):
 # %%
 # Runner function
 
-def runner(corr_type, device_name, model_type, spatial_wt=1.0, content_wt=1.0, style_wt=1.0, epochs=300, batch_size=64):
+def runner(corr_type, device_name, model_type, spatial_wt=1.0, content_wt=1.0, ssim_wt=1.0, patch_sz=48, epochs=300, batch_size=64):
 
     if model_type not in ['n2n', 'n2c']:
         print("model_type should be 'n2n' or 'n2c'")
@@ -80,8 +81,8 @@ def runner(corr_type, device_name, model_type, spatial_wt=1.0, content_wt=1.0, s
 
     ## create model
     model = UNet(init_features=16)
-    model_path = os.path.join(model_folder, '%s_%s_%s_%s_%s.pth' %
-        (model_type, corr_type, spatial_wt, content_wt, style_wt))
+    model_path = os.path.join(model_folder, '%s_%s_%s_%s_%s_%s.pth' %
+        (model_type, corr_type, spatial_wt, content_wt, ssim_wt, patch_sz))
 
     optimizer = optim.Adam(model.parameters(), lr=0.02)
 
@@ -116,15 +117,15 @@ def runner(corr_type, device_name, model_type, spatial_wt=1.0, content_wt=1.0, s
     train_X, valid_X = train_X[:, np.newaxis, :, :], valid_X[:, np.newaxis, :, :]
     target_img, valid_target_img = target_img[:, np.newaxis, :, :], valid_target_img[:, np.newaxis, :, :]
     
-    min_valid_loss, min_loss_ep = 0, 0
-    early_stopping_tolerance = 10
+    min_train_loss, min_valid_loss, min_loss_ep = 0, 0, 0
+    early_stopping_tolerance = 100
     vgg = Vgg16()
     vgg.to(device)
 
     for ep in range(epochs):
 
         model.train()
-        running_loss, running_spatial_loss, running_style_loss , running_content_loss = 0.0, 0.0, 0.0, 0.0
+        running_loss, running_spatial_loss, running_ssim_loss, running_content_loss = 0.0, 0.0, 0.0, 0.0
         i = 0
         t2 = time.time()
         while i < len(train_X):
@@ -139,12 +140,9 @@ def runner(corr_type, device_name, model_type, spatial_wt=1.0, content_wt=1.0, s
             spatial_loss = nn.MSELoss(reduction="mean")(outputs, labels)*spatial_wt
             running_spatial_loss += spatial_loss.item()*sz
 
-            # # calculate total variation regularization (anisotropic version)
-            # diff_i = torch.mean(torch.abs(outputs[:, :, :, 1:] - outputs[:, :, :, :-1]))
-            # diff_j = torch.mean(torch.abs(outputs[:, :, 1:, :] - outputs[:, :, :-1, :]))
-            # tv_loss = (diff_i + diff_j)*tv_wt
-            # running_tv_loss += tv_loss.item()*sz
-            
+            ssim_loss = (1 - torch_ssim(outputs, labels, data_range=1.0, size_average=True))*ssim_wt
+            running_ssim_loss += ssim_loss.item()*sz
+
             ## vgg features
             outputs_fea = vgg(outputs)
             del outputs
@@ -152,21 +150,18 @@ def runner(corr_type, device_name, model_type, spatial_wt=1.0, content_wt=1.0, s
             del labels
 
             # calculate content loss
-            content_loss = nn.MSELoss(reduction="mean")(outputs_fea[1], labels_fea[1])*content_wt
+            content_loss = 0.0
+            vgg_shape = outputs_fea[1].shape
+            for i1 in range(0, vgg_shape[2], patch_sz):
+                for j1 in range(0, vgg_shape[3], patch_sz):
+                    content_loss += nn.MSELoss(reduction="mean")\
+                        (outputs_fea[1][:, :, i1:i1+patch_sz, j1:j1+patch_sz],
+                        labels_fea[1][:, :, i1:i1+patch_sz, j1:j1+patch_sz]) * content_wt
             running_content_loss += content_loss.item()*sz
 
-            # calculate style loss
-            style_loss = torch.tensor([0.0]).to(device)
-            for fid in [0,1,2,3]:
-                if style_wt == 0:
-                    break
-                gr1 = gram(outputs_fea)
-                gr1 = gram(labels_fea)
-                style_loss += nn.MSELoss(reduction="mean")(gr1, gr2)*style_wt
             del outputs_fea, labels_fea
-            running_style_loss += style_loss.item()*sz
 
-            loss =  spatial_loss + content_loss + style_loss
+            loss =  spatial_loss + content_loss + ssim_loss
             loss.backward()
             optimizer.step()
 
@@ -176,7 +171,7 @@ def runner(corr_type, device_name, model_type, spatial_wt=1.0, content_wt=1.0, s
         running_loss /= len(train_X)
         running_spatial_loss /= len(train_X)
         running_content_loss /= len(train_X)
-        running_style_loss /= len(train_X)
+        running_ssim_loss /= len(train_X)
         train_loss_history.append(running_loss)
 
         ## validation loss
@@ -190,45 +185,43 @@ def runner(corr_type, device_name, model_type, spatial_wt=1.0, content_wt=1.0, s
                 sz = len(inputs)
                 outputs = model(inputs)
                 spatial_loss = nn.MSELoss(reduction="mean")(outputs, labels)*spatial_wt
-                # # total variation regularization (anisotropic version)
-                # diff_i = torch.sum(torch.abs(outputs[:, :, :, 1:] - outputs[:, :, :, :-1]))
-                # diff_j = torch.sum(torch.abs(outputs[:, :, 1:, :] - outputs[:, :, :-1, :]))
-                # tv_loss = (diff_i + diff_j)*tv_wt
+                ssim_loss = (1 - torch_ssim(outputs, labels, data_range=1.0, size_average=True))*ssim_wt
                 ## vgg features
                 outputs_fea = vgg(outputs)
                 del outputs
                 labels_fea = vgg(labels)
                 del labels
                 # calculate content loss
-                content_loss = nn.MSELoss(reduction="mean")(outputs_fea[1], labels_fea[1])*content_wt
-                style_loss = torch.tensor([0.0]).to(device)
-                for fid in [0,1,2,3]:
-                    if style_wt == 0:
-                        break
-                    gr1 = gram(outputs_fea)
-                    gr1 = gram(labels_fea)
-                    style_loss += nn.MSELoss(reduction="mean")(gr1, gr2)*style_wt
+                content_loss = 0.0
+                vgg_shape = outputs_fea[1].shape
+                for i1 in range(0, vgg_shape[2], patch_sz):
+                    for j1 in range(0, vgg_shape[3], patch_sz):
+                        content_loss += nn.MSELoss(reduction="mean")\
+                            (outputs_fea[1][:, :, i1:i1+patch_sz, j1:j1+patch_sz],
+                            labels_fea[1][:, :, i1:i1+patch_sz, j1:j1+patch_sz]) * content_wt
                 del outputs_fea, labels_fea
-                loss = spatial_loss + content_loss + style_loss
+                loss = spatial_loss + content_loss + ssim_loss
                 running_valid_loss += loss.item()*sz
                 i += batch_size
 
         running_valid_loss /= len(valid_X)
         valid_loss_history.append(running_valid_loss)
 
-        if ep%30 == 0 or True:
-            print("epoch %s, time = %.2f sec, losses: train = %.4f, spatial = %.4f, content = %.4f, style = %.4f, val = %.4f" %
-            (ep, time.time()-t2, running_loss, running_spatial_loss, running_content_loss, running_style_loss, running_valid_loss))
+        if ep%30 == 0:
+            print("epoch %s, time: %.2f sec, losses - train: %.4f, spatial: %.4f, content: %.4f, ssim: %.4f, val: %.4f" %
+            (ep, time.time()-t2, running_loss, running_spatial_loss, running_content_loss, running_ssim_loss, running_valid_loss))
         
         ## save best model
         if ep==0 or running_valid_loss < min_valid_loss:
             min_valid_loss = running_valid_loss
-            min_loss_ep = ep
             torch.save(model.state_dict(), model_path)
         ## early stopping
-        # if ep>60 and ep-min_loss_ep > early_stopping_tolerance:
-        #     print('Stopping early...total epochs = %d' % ep)
-        #     break
+        if ep==0 or running_loss < min_train_loss:
+            min_train_loss = running_loss
+            min_loss_ep = ep
+        if ep>60 and ep-min_loss_ep > early_stopping_tolerance:
+            print('Stopping early...total epochs = %d' % ep)
+            break
                 
     train_X, valid_X = train_X[:, 0, :, :], valid_X[:, 0, :, :]
 
@@ -241,8 +234,8 @@ def runner(corr_type, device_name, model_type, spatial_wt=1.0, content_wt=1.0, s
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
-    print('Corruption type : %s, model type : %s, weights: spatial = %s, content = %s, style = %s'
-    % (corr_type, model_type, spatial_wt, content_wt, style_wt))
+    print('Corruption type : %s, model type : %s, weights: spatial = %s, content = %s, ssim = %s, patch_sz = %s'
+    % (corr_type, model_type, spatial_wt, content_wt, ssim_wt, patch_sz))
     
     train_output = predict(model, train_X, batch_size, device)
     valid_output = predict(model, valid_X, batch_size, device)
@@ -280,7 +273,7 @@ def runner(corr_type, device_name, model_type, spatial_wt=1.0, content_wt=1.0, s
     plt.legend(['train loss', 'valid loss'])
     plt.xlabel('epoch')
     plt.ylabel('loss')
-    plt.title('%s %s weights - spatial:%s, content:%s, style:%s' % (model_type, corr_type, spatial_wt, content_wt, style_wt))
+    plt.title('%s %s weights - spatial:%s, content:%s, ssim:%s, patch_sz:%s' % (model_type, corr_type, spatial_wt, content_wt, ssim_wt, patch_sz))
     plt.tight_layout()
     plt.savefig(os.path.join(loss_history_img, '%s_loss.png' % (os.path.split(model_path)[-1][:-4])))
     plt.close(fig)
@@ -325,7 +318,7 @@ corruption_params = {
 }
 
 # %%
-runner('high_3', 'cuda:6', 'n2c', 1e1, 1e-2, 0, 100, 24)
+# runner('low_3', 'cuda:6', 'n2c', spatial_wt=1e3, content_wt=1e-3, ssim_wt=1e-1, patch_sz=32, epochs=300, batch_size=32)
 
 # %%
 
@@ -333,7 +326,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--model_type", type=str, help="n2n or n2c")
 parser.add_argument("--device", type=str, help="free gpu - (cuda:id) or cpu")
 parser.add_argument("--content_wt", type=float, help="content loss weight")
-parser.add_argument("--style_wt", type=float, help="style loss weight")
+parser.add_argument("--ssim_wt", type=float, help="ssim loss weight")
 parser.add_argument("--spatial_wt", type=float, help="spatial loss weight")
 parser.add_argument("--noise_type", type=str, help="[high/low]_[1/2/3]")
 args = parser.parse_args()
@@ -341,21 +334,20 @@ args = parser.parse_args()
 device_name = args.device
 model_type = args.model_type
 content_wt = args.content_wt
-style_wt = args.style_wt
+ssim_wt = args.ssim_wt
 spatial_wt = args.spatial_wt
 noise_type = args.noise_type
 
 if device_name is None or model_type not in ['n2n', 'n2c']:
     print("device, model_type, noise_type needed")
     exit()
-batch_size = 24
+batch_size = 32
 epochs = 300
-content_wt = 1e1
-spatial_wt = 1e1
-style_wts = [1e2, 1e3, 1e4, 1e5]
-style_wts = [0]
+content_wts = [3e-4, 1e-3, 3e-3, 1e-2, 3e-2]
+spatial_wt = 1e3
 
-for style_wt in style_wts:
-    print('\n---------------------------')
-    runner(noise_type, device_name, model_type, content_wt, style_wt, 1e-6, epochs, batch_size)
+for noise_type in ['high_3', 'low_3']:
+    for content_wt in content_wts:
+        print('\n---------------------------')
+        runner(noise_type, device_name, model_type, spatial_wt, content_wt, ssim_wt, 32, epochs, batch_size)
 
